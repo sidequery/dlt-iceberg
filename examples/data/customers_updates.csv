@@ -1,0 +1,5 @@
+customer_id,name,email,status,city
+2,Bob Smith,bob.smith@example.com,inactive,Los Angeles
+3,Carol White,carol@example.com,active,Chicago
+6,Frank Miller,frank@example.com,active,Philadelphia
+7,Grace Lee,grace@example.com,active,San Antonio

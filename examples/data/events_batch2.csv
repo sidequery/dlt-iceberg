@@ -1,0 +1,6 @@
+event_id,timestamp,event_type,user_id,value
+6,2024-01-01T12:00:00,purchase,101,150
+7,2024-01-01T12:30:00,page_view,104,2
+8,2024-01-01T13:00:00,login,105,1
+9,2024-01-01T13:30:00,purchase,105,300
+10,2024-01-01T14:00:00,logout,101,1
