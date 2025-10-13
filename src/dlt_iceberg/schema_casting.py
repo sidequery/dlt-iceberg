@@ -6,10 +6,73 @@ and allow users to control casting behavior.
 """
 
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Callable
 import pyarrow as pa
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_iceberg_compatible_arrow_schema(schema: pa.Schema) -> pa.Schema:
+    """
+    Convert Arrow schema to Iceberg-compatible schema.
+
+    Converts types that Iceberg doesn't support:
+    - time32 → time64 (microseconds)
+    - decimal256 → string (Iceberg only supports decimal128)
+    - dictionary → value_type (unwrap dictionary encoding)
+
+    Args:
+        schema: PyArrow schema
+
+    Returns:
+        Iceberg-compatible PyArrow schema
+    """
+    def convert_field(field: pa.Field) -> pa.Field:
+        field_type = field.type
+
+        # time32 → time64(us)
+        if pa.types.is_time32(field_type):
+            return pa.field(field.name, pa.time64("us"), nullable=field.nullable)
+
+        # decimal256 → string (pyarrow doesn't allow downcasting to decimal128)
+        if pa.types.is_decimal256(field_type):
+            logger.warning(
+                f"Converting decimal256 field '{field.name}' to string "
+                f"(Iceberg doesn't support decimal256)"
+            )
+            return pa.field(field.name, pa.string(), nullable=field.nullable)
+
+        # dictionary → value_type (unwrap dictionary encoding)
+        if pa.types.is_dictionary(field_type):
+            return pa.field(field.name, field_type.value_type, nullable=field.nullable)
+
+        # list/struct types - recursively convert nested fields
+        if pa.types.is_list(field_type):
+            value_field = convert_field(pa.field("item", field_type.value_type))
+            return pa.field(field.name, pa.list_(value_field.type), nullable=field.nullable)
+
+        if pa.types.is_struct(field_type):
+            new_fields = [convert_field(f) for f in field_type]
+            return pa.field(field.name, pa.struct(new_fields), nullable=field.nullable)
+
+        return field
+
+    new_fields = [convert_field(field) for field in schema]
+    return pa.schema(new_fields)
+
+
+def ensure_iceberg_compatible_arrow_data(table: pa.Table) -> pa.Table:
+    """
+    Convert Arrow table to Iceberg-compatible schema and cast data.
+
+    Args:
+        table: PyArrow table
+
+    Returns:
+        Table with Iceberg-compatible schema
+    """
+    new_schema = ensure_iceberg_compatible_arrow_schema(table.schema)
+    return table.cast(new_schema)
 
 
 class CastingError(Exception):

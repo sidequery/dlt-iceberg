@@ -34,7 +34,11 @@ from pyiceberg.exceptions import (
 from .schema_converter import convert_dlt_to_iceberg_schema
 from .partition_builder import build_partition_spec
 from .schema_evolution import evolve_schema_if_needed, SchemaEvolutionError
-from .schema_casting import cast_table_safe, CastingError
+from .schema_casting import (
+    cast_table_safe,
+    CastingError,
+    ensure_iceberg_compatible_arrow_data,
+)
 from .error_handling import (
     is_retryable_error,
     log_error_with_context,
@@ -88,6 +92,9 @@ class IcebergRestConfiguration(DestinationClientConfiguration):
 
     # Schema casting configuration
     strict_casting: bool = False
+
+    # Merge batch size (for upsert operations to avoid memory issues)
+    merge_batch_size: int = 100000
 
 
 class IcebergRestLoadJob(RunnableLoadJob):
@@ -380,7 +387,8 @@ class IcebergRestClient(JobClientBase):
                 # Create table if needed
                 if not table_exists:
                     # Use first file's Arrow table to generate schema
-                    first_arrow_table = file_data[0][2]
+                    # Apply Iceberg compatibility first so schema uses compatible types
+                    first_arrow_table = ensure_iceberg_compatible_arrow_data(file_data[0][2])
                     iceberg_schema = convert_dlt_to_iceberg_schema(
                         table_schema, first_arrow_table
                     )
@@ -401,7 +409,7 @@ class IcebergRestClient(JobClientBase):
                     logger.info(f"Created table {identifier} at {iceberg_table.location()}")
                 else:
                     # Table exists - check if schema evolution is needed
-                    first_arrow_table = file_data[0][2]
+                    first_arrow_table = ensure_iceberg_compatible_arrow_data(file_data[0][2])
                     incoming_schema = convert_dlt_to_iceberg_schema(
                         table_schema, first_arrow_table
                     )
@@ -415,12 +423,15 @@ class IcebergRestClient(JobClientBase):
                         logger.info(f"Schema evolved for table {identifier}")
                         iceberg_table = catalog.load_table(identifier)
 
-                # Combine all Arrow tables and cast to match Iceberg schema
+                # Get expected schema (already has Iceberg-compatible types from creation)
                 expected_schema = schema_to_pyarrow(iceberg_table.schema())
+
+                # Combine all Arrow tables and cast to match Iceberg schema
                 combined_tables = []
 
                 for _, file_path, arrow_table in file_data:
-                    # Cast each table to match Iceberg schema
+                    # Cast to match Iceberg schema
+                    # (compatibility conversions already applied when schema was created)
                     casted_table = cast_table_safe(
                         arrow_table,
                         expected_schema,
@@ -463,15 +474,34 @@ class IcebergRestClient(JobClientBase):
                         iceberg_table.append(combined_table)
                     else:
                         logger.info(f"Merging into table {identifier} on keys {primary_keys}")
-                        upsert_result = iceberg_table.upsert(
-                            df=combined_table,
-                            join_cols=primary_keys,
-                            when_matched_update_all=True,
-                            when_not_matched_insert_all=True,
-                        )
+
+                        # Batch upserts to avoid memory issues on large datasets
+                        batch_size = self.config.merge_batch_size
+                        total_updated = 0
+                        total_inserted = 0
+
+                        for batch_start in range(0, len(combined_table), batch_size):
+                            batch_end = min(batch_start + batch_size, len(combined_table))
+                            batch = combined_table.slice(batch_start, batch_end - batch_start)
+
+                            logger.info(
+                                f"Upserting batch {batch_start//batch_size + 1}: "
+                                f"rows {batch_start} to {batch_end} ({len(batch)} rows)"
+                            )
+
+                            upsert_result = iceberg_table.upsert(
+                                df=batch,
+                                join_cols=primary_keys,
+                                when_matched_update_all=True,
+                                when_not_matched_insert_all=True,
+                            )
+
+                            total_updated += upsert_result.rows_updated
+                            total_inserted += upsert_result.rows_inserted
+
                         logger.info(
-                            f"Upsert completed: {upsert_result.rows_updated} updated, "
-                            f"{upsert_result.rows_inserted} inserted"
+                            f"Upsert completed: {total_updated} updated, "
+                            f"{total_inserted} inserted across {(total_rows + batch_size - 1) // batch_size} batches"
                         )
                 else:
                     raise ValueError(f"Unknown write disposition: {write_disposition}")
