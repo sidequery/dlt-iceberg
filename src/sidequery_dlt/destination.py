@@ -7,7 +7,6 @@ This custom destination writes data to Apache Iceberg tables using a REST catalo
 
 import time
 import logging
-import threading
 from typing import Optional, Dict, Any
 from pathlib import Path
 
@@ -37,65 +36,6 @@ from pyiceberg.io.pyarrow import schema_to_pyarrow
 
 logger = logging.getLogger(__name__)
 
-# Module-level catalog cache for connection pooling
-# Key: hash of catalog config, Value: catalog instance
-_catalog_cache: Dict[int, Any] = {}
-_catalog_cache_lock = threading.Lock()
-
-
-def _config_hash(config: Dict[str, Any]) -> int:
-    """Create a deterministic hash of catalog configuration."""
-    # Convert config to a sorted tuple of items for hashing
-    # This ensures the same config always produces the same hash
-    items = []
-    for key in sorted(config.keys()):
-        value = config[key]
-        # Convert bools and None to strings for consistency
-        if isinstance(value, bool):
-            value = str(value)
-        elif value is None:
-            value = "None"
-        items.append((key, value))
-    return hash(tuple(items))
-
-
-def _get_or_create_catalog(catalog_config: Dict[str, Any]) -> Any:
-    """
-    Get cached catalog or create new one if not exists.
-
-    Thread-safe catalog pooling to avoid creating new connections for each file.
-    """
-    config_key = _config_hash(catalog_config)
-
-    # Fast path: check if catalog exists without lock
-    if config_key in _catalog_cache:
-        logger.debug(f"Reusing cached catalog (config hash: {config_key})")
-        return _catalog_cache[config_key]
-
-    # Slow path: create new catalog with lock
-    with _catalog_cache_lock:
-        # Double-check after acquiring lock (another thread may have created it)
-        if config_key in _catalog_cache:
-            logger.debug(f"Reusing cached catalog (config hash: {config_key})")
-            return _catalog_cache[config_key]
-
-        # Create new catalog
-        catalog_type = catalog_config.get("type", "rest")
-        catalog_uri = catalog_config.get("uri", "unknown")
-        logger.info(
-            f"Creating NEW catalog connection (type={catalog_type}, uri={catalog_uri}, "
-            f"config_hash={config_key}, cache_size={len(_catalog_cache)})"
-        )
-
-        catalog = load_catalog("dlt_catalog", **catalog_config)
-        _catalog_cache[config_key] = catalog
-
-        logger.info(
-            f"Catalog cached successfully (cache_size={len(_catalog_cache)})"
-        )
-
-        return catalog
-
 
 def _iceberg_rest_handler(
     items: str,  # File path when batch_size=0
@@ -123,7 +63,7 @@ def _iceberg_rest_handler(
     max_retries: int = 5,
     retry_backoff_base: float = 2.0,
     # Schema casting configuration
-    strict_casting: bool = True,
+    strict_casting: bool = False,
 ) -> None:
     """
     Custom dlt destination for Iceberg tables with REST catalog.
@@ -144,7 +84,7 @@ def _iceberg_rest_handler(
         retry_backoff_base: Base for exponential backoff
         strict_casting: If True, fail when schema cast would lose data (timezone info,
                        precision, etc.). If False, proceed with aggressive casting and
-                       log warnings. Default is True for data integrity.
+                       log warnings. Default is False for backward compatibility.
     """
 
     # Build catalog configuration
@@ -189,8 +129,13 @@ def _iceberg_rest_handler(
     if s3_region:
         catalog_config["s3.region"] = s3_region
 
-    # Get or create cached catalog (connection pooling)
-    catalog = _get_or_create_catalog(catalog_config)
+    # Create fresh catalog connection for each file
+    catalog_type = catalog_config.get("type", "rest")
+    catalog_uri = catalog_config.get("uri", "unknown")
+    logger.info(
+        f"Creating catalog connection (type={catalog_type}, uri={catalog_uri})"
+    )
+    catalog = load_catalog("dlt_catalog", **catalog_config)
 
     # Get table information
     table_name = table["name"]
