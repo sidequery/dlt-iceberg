@@ -1,9 +1,26 @@
 """
 Partition spec builder for Iceberg tables.
+
+Supports advanced Iceberg partitioning transforms:
+- Temporal: year, month, day, hour
+- Identity: no transformation
+- Bucket: hash-based partitioning with bucket[N] syntax
+- Truncate: truncate to width with truncate[N] syntax
+
+Examples:
+    # Bucket partitioning on user_id into 10 buckets
+    partition_transform="bucket[10]"
+
+    # Truncate string to 4 characters
+    partition_transform="truncate[4]"
+
+    # Temporal partitioning
+    partition_transform="month"
 """
 
 import logging
-from typing import Optional
+import re
+from typing import Optional, Tuple
 from dlt.common.schema import TTableSchema
 from pyiceberg.schema import Schema
 from pyiceberg.partitioning import PartitionSpec, PartitionField
@@ -13,6 +30,8 @@ from pyiceberg.transforms import (
     MonthTransform,
     DayTransform,
     HourTransform,
+    BucketTransform,
+    TruncateTransform,
 )
 from pyiceberg.types import (
     TimestampType,
@@ -20,9 +39,97 @@ from pyiceberg.types import (
     StringType,
     IntegerType,
     LongType,
+    BinaryType,
+    DecimalType,
+    DoubleType,
+    FloatType,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def parse_transform_hint(hint: str) -> Tuple[str, Optional[int]]:
+    """
+    Parse partition transform hint into transform type and parameter.
+
+    Supports:
+    - Simple transforms: "year", "month", "day", "hour", "identity"
+    - Parameterized transforms: "bucket[10]", "truncate[5]"
+
+    Args:
+        hint: Transform hint string
+
+    Returns:
+        Tuple of (transform_type, parameter)
+        Example: ("bucket", 10) or ("month", None)
+
+    Raises:
+        ValueError: If hint format is invalid
+    """
+    # Check for parameterized transform: bucket[N] or truncate[N]
+    match = re.match(r"^(\w+)\[(\d+)\]$", hint)
+    if match:
+        transform_type = match.group(1)
+        param = int(match.group(2))
+        return (transform_type, param)
+
+    # Simple transform
+    return (hint, None)
+
+
+def validate_transform_for_type(
+    transform_type: str, param: Optional[int], field_type, col_name: str
+) -> None:
+    """
+    Validate that a transform is appropriate for the field type.
+
+    Args:
+        transform_type: Transform type (e.g., "bucket", "truncate", "month")
+        param: Transform parameter (e.g., bucket count, truncate width)
+        field_type: Iceberg field type
+        col_name: Column name for error messages
+
+    Raises:
+        ValueError: If transform is invalid for the field type
+    """
+    # Temporal transforms only for timestamp/date
+    temporal_transforms = {"year", "month", "day", "hour"}
+    if transform_type in temporal_transforms:
+        if not isinstance(field_type, (TimestampType, DateType)):
+            raise ValueError(
+                f"Temporal transform '{transform_type}' cannot be applied to "
+                f"column '{col_name}' with type {field_type}. "
+                f"Use timestamp or date types for temporal transforms."
+            )
+
+    # Bucket transform validation
+    if transform_type == "bucket":
+        if param is None or param <= 0:
+            raise ValueError(
+                f"Bucket transform requires a positive integer parameter, "
+                f"got: {param} for column '{col_name}'"
+            )
+        # Bucket can be applied to most types except binary
+        if isinstance(field_type, BinaryType):
+            raise ValueError(
+                f"Bucket transform cannot be applied to binary column '{col_name}'"
+            )
+
+    # Truncate transform validation
+    if transform_type == "truncate":
+        if param is None or param <= 0:
+            raise ValueError(
+                f"Truncate transform requires a positive integer parameter, "
+                f"got: {param} for column '{col_name}'"
+            )
+        # Truncate works on strings, integers, longs, decimals, binary
+        valid_types = (StringType, IntegerType, LongType, DecimalType, BinaryType)
+        if not isinstance(field_type, valid_types):
+            raise ValueError(
+                f"Truncate transform cannot be applied to column '{col_name}' "
+                f"with type {field_type}. "
+                f"Use string, integer, long, decimal, or binary types."
+            )
 
 
 def build_partition_spec(
@@ -99,37 +206,72 @@ def choose_partition_transform(field_type, col_name: str, col_hints: dict):
     """
     Choose appropriate Iceberg transform based on field type and hints.
 
+    Supports:
+    - Temporal transforms: year, month, day, hour (for timestamps/dates)
+    - Bucket transforms: bucket[N] (hash-based partitioning)
+    - Truncate transforms: truncate[N] (truncate to width)
+    - Identity transform: no transformation
+
     Args:
         field_type: Iceberg field type
         col_name: Column name
-        col_hints: dlt column hints (may contain partition transform info)
+        col_hints: dlt column hints (may contain partition_transform)
 
     Returns:
         Iceberg transform
+
+    Raises:
+        ValueError: If transform is invalid for the field type
+
+    Examples:
+        # Bucket partitioning
+        col_hints = {"partition_transform": "bucket[10]"}
+
+        # Truncate partitioning
+        col_hints = {"partition_transform": "truncate[4]"}
+
+        # Temporal partitioning
+        col_hints = {"partition_transform": "month"}
     """
     # Check if user specified a transform in hints
     partition_transform = col_hints.get("partition_transform")
 
-    # Timestamp/Date types: use temporal transforms
-    if isinstance(field_type, (TimestampType, DateType)):
-        if partition_transform == "year":
+    if partition_transform:
+        # Parse the transform hint
+        transform_type, param = parse_transform_hint(partition_transform)
+
+        # Validate transform is appropriate for field type
+        validate_transform_for_type(transform_type, param, field_type, col_name)
+
+        # Create the appropriate transform
+        if transform_type == "bucket":
+            return BucketTransform(num_buckets=param)
+        elif transform_type == "truncate":
+            return TruncateTransform(width=param)
+        elif transform_type == "year":
             return YearTransform()
-        elif partition_transform == "month":
+        elif transform_type == "month":
             return MonthTransform()
-        elif partition_transform == "day":
+        elif transform_type == "day":
             return DayTransform()
-        elif partition_transform == "hour":
+        elif transform_type == "hour":
             return HourTransform()
+        elif transform_type == "identity":
+            return IdentityTransform()
         else:
-            # Default to month for timestamps/dates
-            return MonthTransform()
+            raise ValueError(
+                f"Unknown transform type '{transform_type}' for column '{col_name}'"
+            )
 
-    # String, Integer, Long: use identity transform
+    # No hint specified - use defaults based on type
+    if isinstance(field_type, (TimestampType, DateType)):
+        # Default to month for timestamps/dates
+        return MonthTransform()
     elif isinstance(field_type, (StringType, IntegerType, LongType)):
+        # Default to identity for discrete types
         return IdentityTransform()
-
-    # Default: identity transform
     else:
+        # Fallback to identity
         logger.warning(
             f"Using identity transform for {col_name} with type {field_type}"
         )
@@ -137,7 +279,15 @@ def choose_partition_transform(field_type, col_name: str, col_hints: dict):
 
 
 def get_transform_name(transform) -> str:
-    """Get human-readable name for transform."""
+    """
+    Get human-readable name for transform.
+
+    Args:
+        transform: Iceberg transform instance
+
+    Returns:
+        String representation of the transform
+    """
     if isinstance(transform, IdentityTransform):
         return "identity"
     elif isinstance(transform, YearTransform):
@@ -148,5 +298,9 @@ def get_transform_name(transform) -> str:
         return "day"
     elif isinstance(transform, HourTransform):
         return "hour"
+    elif isinstance(transform, BucketTransform):
+        return f"bucket_{transform.num_buckets}"
+    elif isinstance(transform, TruncateTransform):
+        return f"truncate_{transform.width}"
     else:
         return "transform"

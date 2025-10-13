@@ -7,35 +7,97 @@ This custom destination writes data to Apache Iceberg tables using a REST catalo
 
 import time
 import logging
-from typing import Optional
+import threading
+from typing import Optional, Dict, Any
 from pathlib import Path
 
 import dlt
 import pyarrow.parquet as pq
 from dlt.common.schema import TTableSchema
 from pyiceberg.catalog import load_catalog
+from pyiceberg.catalog.rest import RestCatalog
+from pyiceberg.catalog.sql import SqlCatalog
 from pyiceberg.exceptions import (
     NoSuchTableError,
     CommitFailedException,
+    NoSuchNamespaceError,
+    ValidationError,
 )
 
 from .schema_converter import convert_dlt_to_iceberg_schema
 from .partition_builder import build_partition_spec
+from .schema_evolution import evolve_schema_if_needed, SchemaEvolutionError
+from .schema_casting import cast_table_safe, CastingError
+from .error_handling import (
+    is_retryable_error,
+    log_error_with_context,
+    get_user_friendly_error_message,
+)
 from pyiceberg.io.pyarrow import schema_to_pyarrow
 
 logger = logging.getLogger(__name__)
 
+# Module-level catalog cache for connection pooling
+# Key: hash of catalog config, Value: catalog instance
+_catalog_cache: Dict[int, Any] = {}
+_catalog_cache_lock = threading.Lock()
 
-@dlt.destination(
-    batch_size=0,  # Receive file paths instead of data items
-    loader_file_format="parquet",
-    name="iceberg_rest",
-    naming_convention="snake_case",
-    skip_dlt_columns_and_tables=True,  # Skip internal dlt tables
-    max_parallel_load_jobs=5,
-    loader_parallelism_strategy="table-sequential",
-)
-def iceberg_rest(
+
+def _config_hash(config: Dict[str, Any]) -> int:
+    """Create a deterministic hash of catalog configuration."""
+    # Convert config to a sorted tuple of items for hashing
+    # This ensures the same config always produces the same hash
+    items = []
+    for key in sorted(config.keys()):
+        value = config[key]
+        # Convert bools and None to strings for consistency
+        if isinstance(value, bool):
+            value = str(value)
+        elif value is None:
+            value = "None"
+        items.append((key, value))
+    return hash(tuple(items))
+
+
+def _get_or_create_catalog(catalog_config: Dict[str, Any]) -> Any:
+    """
+    Get cached catalog or create new one if not exists.
+
+    Thread-safe catalog pooling to avoid creating new connections for each file.
+    """
+    config_key = _config_hash(catalog_config)
+
+    # Fast path: check if catalog exists without lock
+    if config_key in _catalog_cache:
+        logger.debug(f"Reusing cached catalog (config hash: {config_key})")
+        return _catalog_cache[config_key]
+
+    # Slow path: create new catalog with lock
+    with _catalog_cache_lock:
+        # Double-check after acquiring lock (another thread may have created it)
+        if config_key in _catalog_cache:
+            logger.debug(f"Reusing cached catalog (config hash: {config_key})")
+            return _catalog_cache[config_key]
+
+        # Create new catalog
+        catalog_type = catalog_config.get("type", "rest")
+        catalog_uri = catalog_config.get("uri", "unknown")
+        logger.info(
+            f"Creating NEW catalog connection (type={catalog_type}, uri={catalog_uri}, "
+            f"config_hash={config_key}, cache_size={len(_catalog_cache)})"
+        )
+
+        catalog = load_catalog("dlt_catalog", **catalog_config)
+        _catalog_cache[config_key] = catalog
+
+        logger.info(
+            f"Catalog cached successfully (cache_size={len(_catalog_cache)})"
+        )
+
+        return catalog
+
+
+def _iceberg_rest_handler(
     items: str,  # File path when batch_size=0
     table: TTableSchema,
     # Catalog configuration
@@ -60,6 +122,8 @@ def iceberg_rest(
     # Retry configuration
     max_retries: int = 5,
     retry_backoff_base: float = 2.0,
+    # Schema casting configuration
+    strict_casting: bool = True,
 ) -> None:
     """
     Custom dlt destination for Iceberg tables with REST catalog.
@@ -78,6 +142,9 @@ def iceberg_rest(
         signing_name: AWS service name for SigV4
         max_retries: Maximum retry attempts for commit failures
         retry_backoff_base: Base for exponential backoff
+        strict_casting: If True, fail when schema cast would lose data (timezone info,
+                       precision, etc.). If False, proceed with aggressive casting and
+                       log warnings. Default is True for data integrity.
     """
 
     # Build catalog configuration
@@ -122,9 +189,8 @@ def iceberg_rest(
     if s3_region:
         catalog_config["s3.region"] = s3_region
 
-    # Initialize catalog
-    logger.info(f"Connecting to {catalog_type} catalog at {catalog_uri}")
-    catalog = load_catalog("dlt_catalog", **catalog_config)
+    # Get or create cached catalog (connection pooling)
+    catalog = _get_or_create_catalog(catalog_config)
 
     # Get table information
     table_name = table["name"]
@@ -134,12 +200,25 @@ def iceberg_rest(
     logger.info(f"Processing table {identifier} with disposition {write_disposition}")
 
     # Ensure namespace exists
-    namespaces = catalog.list_namespaces()
-    if (namespace,) not in namespaces:
-        logger.info(f"Creating namespace {namespace}")
-        catalog.create_namespace(namespace)
-    else:
-        logger.info(f"Namespace {namespace} exists")
+    try:
+        namespaces = catalog.list_namespaces()
+        if (namespace,) not in namespaces:
+            logger.info(f"Creating namespace {namespace}")
+            catalog.create_namespace(namespace)
+        else:
+            logger.info(f"Namespace {namespace} exists")
+    except Exception as e:
+        # Non-retryable namespace errors should fail fast
+        if not is_retryable_error(e):
+            log_error_with_context(
+                e,
+                operation=f"ensure namespace {namespace} exists",
+                table_name=table_name,
+                include_traceback=True,
+            )
+            raise RuntimeError(get_user_friendly_error_message(e, "ensure namespace exists")) from e
+        # If retryable, let it propagate to the retry loop
+        raise
 
     # Read parquet file generated by dlt
     file_path = Path(items)
@@ -149,7 +228,7 @@ def iceberg_rest(
     arrow_table = pq.read_table(str(file_path))
     logger.info(f"Read {len(arrow_table)} rows from {file_path}")
 
-    # Retry loop for commit failures
+    # Retry loop for transient failures
     for attempt in range(max_retries):
         try:
             # Check if table exists
@@ -160,6 +239,20 @@ def iceberg_rest(
                 logger.info(f"Loaded existing table {identifier}")
             except NoSuchTableError:
                 logger.info(f"Table {identifier} does not exist, will create")
+            except Exception as e:
+                # Non-retryable errors during table load should fail fast
+                if not is_retryable_error(e):
+                    log_error_with_context(
+                        e,
+                        operation="load table",
+                        table_name=identifier,
+                        attempt=attempt + 1,
+                        max_attempts=max_retries,
+                        include_traceback=True,
+                    )
+                    raise RuntimeError(get_user_friendly_error_message(e, "load table")) from e
+                # Retryable error - propagate to retry loop
+                raise
 
             # Create table if it doesn't exist
             if not table_exists:
@@ -182,11 +275,54 @@ def iceberg_rest(
                     partition_spec=partition_spec,
                 )
                 logger.info(f"Created table {identifier} at {iceberg_table.location()}")
+            else:
+                # Table exists - check if schema evolution is needed
+                incoming_schema = convert_dlt_to_iceberg_schema(table, arrow_table)
 
-            # Cast Arrow table to match Iceberg schema
+                try:
+                    schema_evolved = evolve_schema_if_needed(
+                        iceberg_table,
+                        incoming_schema,
+                        allow_column_drops=False
+                    )
+                    if schema_evolved:
+                        logger.info(f"Schema evolved for table {identifier}")
+                        # Refresh table to get updated schema
+                        iceberg_table = catalog.load_table(identifier)
+                except SchemaEvolutionError as e:
+                    # Schema evolution errors are non-retryable (data model issues)
+                    log_error_with_context(
+                        e,
+                        operation="evolve schema",
+                        table_name=identifier,
+                        include_traceback=True,
+                    )
+                    raise
+
+            # Cast Arrow table to match Iceberg schema with defensive validation
             # This handles timezone differences and other schema mismatches
+            # In strict mode (default), casting fails if data would be lost
+            # In non-strict mode, casting proceeds with warnings
             expected_schema = schema_to_pyarrow(iceberg_table.schema())
-            arrow_table = arrow_table.cast(expected_schema)
+            try:
+                arrow_table = cast_table_safe(
+                    arrow_table,
+                    expected_schema,
+                    strict=strict_casting
+                )
+            except CastingError as e:
+                # Casting errors are non-retryable (schema mismatch)
+                log_error_with_context(
+                    e,
+                    operation="cast schema",
+                    table_name=identifier,
+                    include_traceback=True,
+                )
+                logger.error(
+                    f"Schema casting failed for {identifier}. "
+                    f"Set strict_casting=False to allow aggressive casting."
+                )
+                raise
 
             # Write data based on disposition
             if write_disposition == "replace":
@@ -197,7 +333,18 @@ def iceberg_rest(
                 iceberg_table.append(arrow_table)
             elif write_disposition == "merge":
                 # For merge, we need primary keys
-                primary_keys = table.get("primary_key")
+                # Try multiple ways to get primary keys from dlt table schema
+                primary_keys = table.get("primary_key") or table.get("x-merge-keys")
+
+                # If not found, check columns for primary_key hints
+                if not primary_keys:
+                    columns = table.get("columns", {})
+                    primary_keys = [
+                        col_name
+                        for col_name, col_def in columns.items()
+                        if col_def.get("primary_key") or col_def.get("x-primary-key")
+                    ]
+
                 if not primary_keys:
                     logger.warning(
                         f"Merge disposition requires primary_key, falling back to append"
@@ -205,27 +352,57 @@ def iceberg_rest(
                     iceberg_table.append(arrow_table)
                 else:
                     logger.info(f"Merging into table {identifier} on keys {primary_keys}")
-                    # PyIceberg doesn't have built-in merge yet, use delete+insert
-                    # This is a simplified implementation
-                    iceberg_table.append(arrow_table)
+                    # Use PyIceberg's upsert API to update existing rows and insert new ones
+                    # PyIceberg will automatically match rows based on join_cols (primary keys)
+                    upsert_result = iceberg_table.upsert(
+                        df=arrow_table,
+                        join_cols=primary_keys,
+                        when_matched_update_all=True,
+                        when_not_matched_insert_all=True,
+                    )
+                    logger.info(
+                        f"Upsert completed: {upsert_result.rows_updated} updated, "
+                        f"{upsert_result.rows_inserted} inserted"
+                    )
             else:
                 raise ValueError(f"Unknown write disposition: {write_disposition}")
 
             logger.info(f"Successfully wrote {len(arrow_table)} rows to {identifier}")
             return  # Success
 
-        except CommitFailedException as e:
-            if attempt >= max_retries - 1:
-                logger.error(
-                    f"Commit failed after {max_retries} attempts for {identifier}: {e}"
-                )
-                raise
+        except Exception as e:
+            # Classify the error
+            retryable = is_retryable_error(e)
 
-            # Exponential backoff
+            # Log error with context
+            log_error_with_context(
+                e,
+                operation=f"write data (disposition={write_disposition})",
+                table_name=identifier,
+                attempt=attempt + 1,
+                max_attempts=max_retries,
+                include_traceback=not retryable,  # Full trace for non-retryable errors
+            )
+
+            # Non-retryable errors should fail immediately
+            if not retryable:
+                error_msg = get_user_friendly_error_message(
+                    e, f"write data to table {identifier}"
+                )
+                raise RuntimeError(error_msg) from e
+
+            # Retryable error - check if we should retry
+            if attempt >= max_retries - 1:
+                # Max retries exhausted
+                error_msg = get_user_friendly_error_message(
+                    e, f"write data to table {identifier} after {max_retries} attempts"
+                )
+                raise RuntimeError(error_msg) from e
+
+            # Retry with exponential backoff
             sleep_time = retry_backoff_base ** attempt
-            logger.warning(
-                f"Commit failed for {identifier} (attempt {attempt + 1}/{max_retries}), "
-                f"retrying in {sleep_time}s: {e}"
+            logger.info(
+                f"Retrying after {sleep_time}s (attempt {attempt + 2}/{max_retries})"
             )
             time.sleep(sleep_time)
 
@@ -233,5 +410,46 @@ def iceberg_rest(
             if table_exists:
                 try:
                     iceberg_table.refresh()
+                    logger.debug(f"Refreshed table state for {identifier}")
                 except Exception as refresh_error:
-                    logger.warning(f"Failed to refresh table: {refresh_error}")
+                    logger.warning(
+                        f"Failed to refresh table (will retry anyway): {refresh_error}"
+                    )
+
+
+# Create the base destination factory
+_iceberg_rest_base = dlt.destination(
+    _iceberg_rest_handler,
+    batch_size=0,
+    loader_file_format="parquet",
+    name="iceberg_rest",
+    naming_convention="snake_case",
+    skip_dlt_columns_and_tables=True,
+    max_parallel_load_jobs=5,
+    loader_parallelism_strategy="table-sequential",
+)
+
+
+# Wrap the factory to add merge support to capabilities
+def iceberg_rest(**kwargs):
+    """
+    Iceberg REST destination factory with merge support.
+
+    Returns a destination instance configured for Iceberg with merge capabilities.
+    """
+    # Get the destination instance
+    dest = _iceberg_rest_base(**kwargs)
+
+    # Override the _raw_capabilities method to include merge support
+    original_raw_capabilities = dest._raw_capabilities
+
+    def _raw_capabilities_with_merge():
+        """Add merge support to the destination capabilities."""
+        caps = original_raw_capabilities()
+        caps.supported_merge_strategies = ["upsert"]
+        return caps
+
+    # Bind the new method to the instance
+    dest._raw_capabilities = _raw_capabilities_with_merge
+
+    return dest
