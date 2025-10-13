@@ -82,7 +82,6 @@ def main():
 
     print(f"\nTotal rows in table: {len(result)}")
     print(f"Event IDs: {sorted(result['event_id'].to_pylist())}")
-    print(f"\nSnapshots: {len(list(table.snapshots()))}")
 
     print("\nIncremental load complete!")
 

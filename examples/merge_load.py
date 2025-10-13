@@ -94,7 +94,6 @@ def main():
     print(result.to_pandas()[["customer_id", "name", "email", "status"]].sort_values("customer_id"))
 
     print("\nMerge complete!")
-    print(f"Snapshots: {len(list(table.snapshots()))}")
 
 
 if __name__ == "__main__":
