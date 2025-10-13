@@ -21,7 +21,7 @@ from pyiceberg.transforms import (
     TruncateTransform,
 )
 
-from sidequery_dlt.partition_builder import (
+from dlt_iceberg.partition_builder import (
     build_partition_spec,
     choose_partition_transform,
     parse_transform_hint,

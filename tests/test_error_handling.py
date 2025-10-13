@@ -31,7 +31,7 @@ from pyiceberg.exceptions import (
     RESTError,
 )
 
-from sidequery_dlt.error_handling import (
+from dlt_iceberg.error_handling import (
     is_retryable_error,
     get_error_category,
     log_error_with_context,
@@ -219,7 +219,7 @@ class TestDestinationErrorHandling:
 
     def test_non_retryable_error_fails_immediately(self):
         """Test that non-retryable errors fail without retrying."""
-        from sidequery_dlt.destination import _iceberg_rest_handler
+        from dlt_iceberg.destination import _iceberg_rest_handler
         import dlt
 
         temp_dir = tempfile.mkdtemp()
@@ -237,7 +237,7 @@ class TestDestinationErrorHandling:
             }
 
             # Test with ValidationError (non-retryable)
-            with patch("sidequery_dlt.destination._get_or_create_catalog") as mock_catalog:
+            with patch("dlt_iceberg.destination._get_or_create_catalog") as mock_catalog:
                 mock_catalog_instance = MagicMock()
                 mock_catalog.return_value = mock_catalog_instance
 
@@ -270,7 +270,7 @@ class TestDestinationErrorHandling:
 
     def test_retryable_error_is_retried_multiple_times(self):
         """Test that retryable errors are retried multiple times with backoff."""
-        from sidequery_dlt.destination import _iceberg_rest_handler
+        from dlt_iceberg.destination import _iceberg_rest_handler
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -285,7 +285,7 @@ class TestDestinationErrorHandling:
                 "write_disposition": "append",
             }
 
-            with patch("sidequery_dlt.destination._get_or_create_catalog") as mock_catalog:
+            with patch("dlt_iceberg.destination._get_or_create_catalog") as mock_catalog:
                 mock_catalog_instance = MagicMock()
                 mock_catalog.return_value = mock_catalog_instance
 
@@ -298,7 +298,7 @@ class TestDestinationErrorHandling:
                 mock_catalog_instance.load_table.side_effect = CommitFailedException("concurrent write")
 
                 # Mock time.sleep to speed up test
-                with patch("sidequery_dlt.destination.time.sleep"):
+                with patch("dlt_iceberg.destination.time.sleep"):
                     # Should fail after retries (since we always raise)
                     with pytest.raises(RuntimeError) as exc_info:
                         _iceberg_rest_handler(
@@ -322,7 +322,7 @@ class TestDestinationErrorHandling:
 
     def test_retryable_error_exhausts_retries(self):
         """Test that retryable errors eventually fail after max retries."""
-        from sidequery_dlt.destination import _iceberg_rest_handler
+        from dlt_iceberg.destination import _iceberg_rest_handler
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -337,7 +337,7 @@ class TestDestinationErrorHandling:
                 "write_disposition": "append",
             }
 
-            with patch("sidequery_dlt.destination._get_or_create_catalog") as mock_catalog:
+            with patch("dlt_iceberg.destination._get_or_create_catalog") as mock_catalog:
                 mock_catalog_instance = MagicMock()
                 mock_catalog.return_value = mock_catalog_instance
 
@@ -347,7 +347,7 @@ class TestDestinationErrorHandling:
                 mock_catalog_instance.load_table.side_effect = CommitFailedException("always fails")
 
                 # Mock time.sleep
-                with patch("sidequery_dlt.destination.time.sleep"):
+                with patch("dlt_iceberg.destination.time.sleep"):
                     # Should fail after max_retries
                     with pytest.raises(RuntimeError) as exc_info:
                         _iceberg_rest_handler(

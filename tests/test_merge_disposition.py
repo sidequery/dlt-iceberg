@@ -32,7 +32,7 @@ def test_merge_upsert():
 
     try:
         # Import destination
-        from sidequery_dlt.destination import iceberg_rest
+        from dlt_iceberg.destination import iceberg_rest
 
         # Create dlt pipeline with our destination
         pipeline = dlt.pipeline(
@@ -199,7 +199,7 @@ def test_merge_without_primary_key_falls_back_to_append():
     catalog_path = f"{temp_dir}/catalog.db"
 
     try:
-        from sidequery_dlt.destination import iceberg_rest
+        from dlt_iceberg.destination import iceberg_rest
 
         pipeline = dlt.pipeline(
             pipeline_name="test_merge_fallback",

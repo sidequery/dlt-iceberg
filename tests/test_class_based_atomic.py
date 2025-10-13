@@ -31,7 +31,7 @@ def test_class_based_atomic_commits():
 
     try:
         # Import the class-based destination
-        from sidequery_dlt import iceberg_rest
+        from dlt_iceberg import iceberg_rest
 
         base_time = datetime(2024, 1, 1)
 
@@ -126,7 +126,7 @@ def test_class_based_multiple_tables():
     print(f"   Warehouse: {warehouse_path}")
 
     try:
-        from sidequery_dlt import iceberg_rest
+        from dlt_iceberg import iceberg_rest
 
         base_time = datetime(2024, 1, 1)
 
@@ -223,7 +223,7 @@ def test_class_based_incremental():
     print(f"\n🏗️  Test environment (incremental):")
 
     try:
-        from sidequery_dlt import iceberg_rest
+        from dlt_iceberg import iceberg_rest
 
         base_time = datetime(2024, 1, 1)
 

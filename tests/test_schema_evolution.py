@@ -34,7 +34,7 @@ def test_schema_evolution_add_column():
     print(f"   Catalog: {catalog_path}")
 
     try:
-        from sidequery_dlt.destination import iceberg_rest
+        from dlt_iceberg.destination import iceberg_rest
 
         # LOAD 1: Initial schema with 3 columns
         @dlt.resource(name="events", write_disposition="append")
@@ -153,7 +153,7 @@ def test_schema_evolution_type_promotion():
     print(f"   Catalog: {catalog_path}")
 
     try:
-        from sidequery_dlt.destination import iceberg_rest
+        from dlt_iceberg.destination import iceberg_rest
 
         # LOAD 1: Initial schema with int32 and float32
         @dlt.resource(name="metrics", write_disposition="append")
@@ -252,7 +252,7 @@ def test_schema_evolution_unsafe_changes():
     """
     print(f"\nTest: Schema Evolution - Unsafe Changes (Direct Validation)")
 
-    from sidequery_dlt.schema_evolution import (
+    from dlt_iceberg.schema_evolution import (
         compare_schemas,
         validate_schema_changes,
         SchemaEvolutionError,
@@ -320,7 +320,7 @@ def test_schema_evolution_unit_compare():
     """
     Unit test for schema comparison logic.
     """
-    from sidequery_dlt.schema_evolution import compare_schemas, can_promote_type
+    from dlt_iceberg.schema_evolution import compare_schemas, can_promote_type
 
     print("\nTest: Schema Evolution - Unit Tests")
 

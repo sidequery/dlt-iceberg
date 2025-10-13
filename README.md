@@ -1,4 +1,4 @@
-# Sidequery dlt - Iceberg REST Catalog Destination
+# dlt-iceberg - Iceberg REST Catalog Destination
 
 A custom [dlt](https://dlthub.com/) destination for writing data to [Apache Iceberg](https://iceberg.apache.org/) tables using REST catalog implementations (Polaris, Unity Catalog, AWS Glue, Nessie, etc.).
 
@@ -17,7 +17,7 @@ A custom [dlt](https://dlthub.com/) destination for writing data to [Apache Iceb
 ```bash
 # Clone and install
 git clone <repository-url>
-cd sidequery-dlt
+cd dlt-iceberg
 uv sync
 ```
 
@@ -51,7 +51,7 @@ oauth2_server_uri = "https://polaris.example.com/api/catalog/v1/oauth/tokens"
 ```python
 import dlt
 from datetime import datetime
-from sidequery_dlt import iceberg_rest
+from dlt_iceberg import iceberg_rest
 
 @dlt.resource(
     name="events",
@@ -221,8 +221,8 @@ uv run pytest tests/ -v
 ### Project Structure
 
 ```
-sidequery-dlt/
-├── src/sidequery_dlt/
+dlt-iceberg/
+├── src/dlt_iceberg/
 │   ├── __init__.py
 │   ├── destination.py          # Main destination implementation
 │   ├── schema_converter.py     # dlt → Iceberg schema conversion
@@ -277,11 +277,11 @@ logging.basicConfig(level=logging.INFO)
 
 Output:
 ```
-INFO:sidequery_dlt.destination:Connecting to REST catalog at https://...
-INFO:sidequery_dlt.destination:Processing table production.events with disposition append
-INFO:sidequery_dlt.destination:Read 1000 rows from /path/to/file.parquet
-INFO:sidequery_dlt.destination:Appending to table production.events
-INFO:sidequery_dlt.destination:Successfully wrote 1000 rows to production.events
+INFO:dlt_iceberg.destination:Connecting to REST catalog at https://...
+INFO:dlt_iceberg.destination:Processing table production.events with disposition append
+INFO:dlt_iceberg.destination:Read 1000 rows from /path/to/file.parquet
+INFO:dlt_iceberg.destination:Appending to table production.events
+INFO:dlt_iceberg.destination:Successfully wrote 1000 rows to production.events
 ```
 
 ## How It Works

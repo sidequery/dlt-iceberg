@@ -70,7 +70,7 @@ def test_destination_with_nessie_rest_catalog():
 
     print(f"\n✅ Created test data generator")
 
-    from sidequery_dlt.destination import iceberg_rest
+    from dlt_iceberg.destination import iceberg_rest
 
     # Clean up: Drop table if exists from previous runs
     print(f"\n🧹 Cleaning up from previous test runs...")

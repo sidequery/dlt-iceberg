@@ -13,7 +13,7 @@ from pyiceberg.types import (
     DoubleType,
 )
 
-from sidequery_dlt.schema_converter import (
+from dlt_iceberg.schema_converter import (
     convert_dlt_to_iceberg_schema,
     convert_arrow_to_iceberg_type,
 )

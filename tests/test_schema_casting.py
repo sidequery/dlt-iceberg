@@ -8,7 +8,7 @@ handles timezone/precision conversions safely.
 import pytest
 import pyarrow as pa
 
-from sidequery_dlt.schema_casting import (
+from dlt_iceberg.schema_casting import (
     cast_table_safe,
     validate_cast,
     CastingError,

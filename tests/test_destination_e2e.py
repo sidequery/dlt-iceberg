@@ -47,7 +47,7 @@ def test_destination_end_to_end():
         print(f"\n✅ Created test data generator")
 
         # Import destination
-        from sidequery_dlt.destination import iceberg_rest
+        from dlt_iceberg.destination import iceberg_rest
 
         # Create dlt pipeline with our destination
         pipeline = dlt.pipeline(

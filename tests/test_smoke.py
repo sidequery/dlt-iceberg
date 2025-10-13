@@ -8,9 +8,9 @@ from datetime import datetime
 from unittest.mock import Mock, patch, MagicMock
 import pyarrow as pa
 
-from sidequery_dlt import iceberg_rest
-from sidequery_dlt.schema_converter import convert_dlt_to_iceberg_schema
-from sidequery_dlt.partition_builder import build_partition_spec
+from dlt_iceberg import iceberg_rest
+from dlt_iceberg.schema_converter import convert_dlt_to_iceberg_schema
+from dlt_iceberg.partition_builder import build_partition_spec
 
 
 def test_destination_is_callable():
