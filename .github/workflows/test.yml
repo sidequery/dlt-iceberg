@@ -1,0 +1,96 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      minio:
+        image: minio/minio:latest
+        ports:
+          - 9000:9000
+          - 9001:9001
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+        volumes:
+          - minio-data:/data
+        command: server /data --console-address ":9001"
+
+      nessie:
+        image: ghcr.io/projectnessie/nessie:0.99.0
+        ports:
+          - 19120:19120
+        env:
+          nessie.catalog.default-warehouse: warehouse
+          nessie.catalog.warehouses.warehouse.location: s3://warehouse/
+          nessie.catalog.service.s3.default-options.endpoint: http://minio:9000
+          nessie.catalog.service.s3.default-options.path-style-access: true
+          nessie.catalog.service.s3.default-options.region: us-east-1
+          nessie.catalog.service.s3.default-options.access-key-id: minioadmin
+          nessie.catalog.service.s3.default-options.secret-access-key: minioadmin
+        options: >-
+          --health-cmd "curl -f http://localhost:19120/api/v2/config"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Setup MinIO bucket
+        run: |
+          # Install mc (minio client)
+          wget https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x mc
+
+          # Configure and create bucket
+          ./mc alias set myminio http://localhost:9000 minioadmin minioadmin
+          ./mc mb myminio/warehouse || true
+          ./mc anonymous set public myminio/warehouse
+
+      - name: Wait for Nessie
+        run: |
+          echo "Waiting for Nessie to be ready..."
+          for i in {1..30}; do
+            if curl -f http://localhost:19120/api/v2/config; then
+              echo "Nessie is ready"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 2
+          done
+
+      - name: Run unit tests
+        run: uv run pytest tests/ -m "not integration" -v
+
+      - name: Run integration tests
+        run: uv run pytest tests/ -m integration -v -s
+
+      - name: Run all tests
+        run: uv run pytest tests/ -v
+
+volumes:
+  minio-data:
