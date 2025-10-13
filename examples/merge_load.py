@@ -93,6 +93,11 @@ def main():
     print(f"\nAfter merge: {len(result)} customers")
     print(result.to_pandas()[["customer_id", "name", "email", "status"]].sort_values("customer_id"))
 
+    # TODO: Snapshot counting doesn't work reliably with Nessie - it may compact snapshots
+    # Consider using a different catalog implementation (Polaris, Glue) for examples
+    # snapshots = list(table.snapshots())
+    # print(f"\nSnapshots: {len(snapshots)} (should be 2, one per load)")
+
     print("\nMerge complete!")
 
 

@@ -83,6 +83,11 @@ def main():
     print(f"\nTotal rows in table: {len(result)}")
     print(f"Event IDs: {sorted(result['event_id'].to_pylist())}")
 
+    # TODO: Snapshot counting doesn't work reliably with Nessie - it may compact snapshots
+    # Consider using a different catalog implementation (Polaris, Glue) for examples
+    # snapshots = list(table.snapshots())
+    # print(f"\nSnapshots: {len(snapshots)} (should be 2, one per load)")
+
     print("\nIncremental load complete!")
 
 
