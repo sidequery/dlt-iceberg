@@ -1,221 +1,158 @@
-# dlt-iceberg - Iceberg REST Catalog Destination
+# dlt-iceberg
 
-A custom [dlt](https://dlthub.com/) destination for writing data to [Apache Iceberg](https://iceberg.apache.org/) tables using REST catalog implementations (Polaris, Unity Catalog, AWS Glue, Nessie, etc.).
+A [dlt](https://dlthub.com/) destination for [Apache Iceberg](https://iceberg.apache.org/) tables using REST catalogs.
 
 ## Features
 
-- **REST Catalog Support**: Works with any Iceberg REST catalog (Polaris, Unity, Glue, Nessie, Lakekeeper)
-- **Multiple Authentication Methods**: OAuth2, Bearer token, AWS SigV4
-- **Automatic Schema Conversion**: dlt schema → Iceberg schema with proper type mapping
-- **Partition Support**: Automatically creates partitioned tables from dlt hints
-- **Write Dispositions**: Append, replace, and merge operations
-- **Retry Logic**: Built-in exponential backoff for commit conflicts
-- **Type Safety**: Full PyArrow and Iceberg type support including complex types
+- **Atomic Multi-File Commits**: Multiple parquet files committed as single Iceberg snapshot per table
+- **REST Catalog Support**: Works with Nessie, Polaris, AWS Glue, Unity Catalog
+- **Authentication**: OAuth2, Bearer token, AWS SigV4
+- **Write Dispositions**: Append, replace, merge (upsert)
+- **Schema Evolution**: Automatic schema updates when adding columns
+- **Retry Logic**: Exponential backoff for transient failures
 
 ## Installation
 
 ```bash
-# Clone and install
-git clone <repository-url>
+git clone https://github.com/sidequery/dlt-iceberg.git
 cd dlt-iceberg
 uv sync
 ```
 
 ## Quick Start
 
-### 1. Configure Secrets
+See [examples/](examples/) directory for working examples.
 
-Copy the example secrets file:
-
-```bash
-cp .dlt/secrets.toml.example .dlt/secrets.toml
-```
-
-Edit `.dlt/secrets.toml` with your catalog credentials:
-
-```toml
-[destination.iceberg_rest]
-catalog_uri = "https://polaris.example.com/api/catalog"
-warehouse = "s3://my-bucket/warehouse"
-
-# OAuth2 (recommended)
-credential = "client-id:client-secret"
-oauth2_server_uri = "https://polaris.example.com/api/catalog/v1/oauth/tokens"
-
-# OR Bearer token
-# token = "your-bearer-token"
-```
-
-### 2. Create a Pipeline
+### Incremental Load
 
 ```python
 import dlt
-from datetime import datetime
 from dlt_iceberg import iceberg_rest
 
-@dlt.resource(
-    name="events",
-    write_disposition="append",
-    columns={
-        "event_timestamp": {
-            "data_type": "timestamp",
-            "partition": True,  # Partition by month
-            "nullable": False,
-        }
-    }
-)
+@dlt.resource(name="events", write_disposition="append")
 def generate_events():
-    yield {
-        "event_id": 1,
-        "user_id": 42,
-        "event_type": "click",
-        "event_timestamp": datetime.now(),
-    }
+    yield {"event_id": 1, "value": 100}
 
-# Create pipeline
 pipeline = dlt.pipeline(
     pipeline_name="my_pipeline",
-    destination=iceberg_rest,
-    dataset_name="analytics",  # Not used (namespace set in config)
+    destination=iceberg_rest(
+        catalog_uri="http://localhost:19120/iceberg/main",
+        namespace="analytics",
+        s3_endpoint="http://localhost:9000",
+        s3_access_key_id="minioadmin",
+        s3_secret_access_key="minioadmin",
+        s3_region="us-east-1",
+    ),
 )
 
-# Run pipeline
-load_info = pipeline.run(generate_events())
-print(f"Loaded {len(load_info.loads_ids)} packages")
+pipeline.run(generate_events())
 ```
 
-### 3. Run
+### Merge/Upsert
 
-```bash
-uv run examples/basic_pipeline.py
+```python
+@dlt.resource(
+    name="users",
+    write_disposition="merge",
+    primary_key="user_id"
+)
+def generate_users():
+    yield {"user_id": 1, "name": "Alice", "status": "active"}
+
+pipeline.run(generate_users())
 ```
 
 ## Configuration
 
-### Catalog Settings
-
-Configure in `.dlt/config.toml`:
-
-```toml
-[destination.iceberg_rest]
-namespace = "production"  # Iceberg namespace (database)
-max_retries = 5
-retry_backoff_base = 2.0
-```
-
-### Supported Catalogs
-
-#### Apache Polaris (Local)
-```toml
-[destination.iceberg_rest]
-catalog_uri = "http://localhost:8181/api/catalog"
-warehouse = "file:///tmp/warehouse"
-token = "principal:root;realm:default-realm"
-```
-
-#### AWS Glue REST Catalog
-```toml
-[destination.iceberg_rest]
-catalog_uri = "https://glue.us-east-1.amazonaws.com/iceberg"
-warehouse = "<account-id>:s3tablescatalog/<bucket>"
-sigv4_enabled = true  # Set in config.toml
-signing_region = "us-east-1"
-```
-
-Then set AWS credentials via environment:
-```bash
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-```
-
-#### Unity Catalog (Databricks)
-```toml
-[destination.iceberg_rest]
-catalog_uri = "https://<workspace>.cloud.databricks.com/api/2.1/unity-catalog/iceberg-rest"
-warehouse = "<catalog-name>"
-token = "<databricks-token>"
-```
-
-## Partitioning
-
-Mark columns for partitioning in dlt resource hints:
+### Nessie (Docker)
 
 ```python
-@dlt.resource(
-    name="events",
-    columns={
-        "event_date": {
-            "data_type": "date",
-            "partition": True,
-            "partition_transform": "day",  # Optional: year, month, day, hour
-        },
-        "region": {
-            "data_type": "text",
-            "partition": True,  # Identity transform for strings
-        }
-    }
+iceberg_rest(
+    catalog_uri="http://localhost:19120/iceberg/main",
+    namespace="my_namespace",
+    s3_endpoint="http://localhost:9000",
+    s3_access_key_id="minioadmin",
+    s3_secret_access_key="minioadmin",
+    s3_region="us-east-1",
 )
-def events():
-    ...
 ```
 
-**Transform Selection**:
-- `timestamp`/`date` columns: Default to `month` transform (specify `day`, `hour`, `year` for others)
-- `string`/`integer` columns: Use `identity` transform
-- Custom: Set `partition_transform` in column hints
+Start services: `docker compose up -d`
+
+### AWS Glue
+
+```python
+iceberg_rest(
+    catalog_uri="https://glue.us-east-1.amazonaws.com/iceberg",
+    warehouse="<account-id>:s3tablescatalog/<bucket>",
+    namespace="my_database",
+    sigv4_enabled=True,
+    signing_region="us-east-1",
+)
+```
+
+AWS credentials via environment variables.
+
+### Polaris
+
+```python
+iceberg_rest(
+    catalog_uri="https://polaris.example.com/api/catalog",
+    warehouse="s3://bucket/warehouse",
+    namespace="production",
+    credential="client-id:client-secret",
+    oauth2_server_uri="https://polaris.example.com/api/catalog/v1/oauth/tokens",
+)
+```
+
+### Unity Catalog
+
+```python
+iceberg_rest(
+    catalog_uri="https://<workspace>.cloud.databricks.com/api/2.1/unity-catalog/iceberg-rest",
+    warehouse="<catalog-name>",
+    namespace="<schema-name>",
+    token="<databricks-token>",
+)
+```
 
 ## Write Dispositions
 
-### Append (Default)
+### Append
 ```python
-@dlt.resource(write_disposition="append")
-def events():
-    ...
+write_disposition="append"
 ```
 Adds new data without modifying existing rows.
 
 ### Replace
 ```python
-@dlt.resource(write_disposition="replace")
-def snapshot_table():
-    ...
+write_disposition="replace"
 ```
-Overwrites entire table.
+Truncates table and inserts new data.
 
-### Merge/Upsert
+### Merge
 ```python
-@dlt.resource(
-    write_disposition="merge",
-    primary_key="user_id"
-)
-def users():
-    ...
+write_disposition="merge"
+primary_key="user_id"
 ```
-Updates existing rows based on primary key, inserts new rows.
-
-## Schema Conversion
-
-Automatic type mapping from dlt/PyArrow to Iceberg:
-
-| PyArrow Type | Iceberg Type |
-|--------------|--------------|
-| `bool_` | `BooleanType` |
-| `int32`, `int64` | `IntegerType`, `LongType` |
-| `float32`, `float64` | `FloatType`, `DoubleType` |
-| `string` | `StringType` |
-| `timestamp` | `TimestampType` |
-| `date` | `DateType` |
-| `list_` | `ListType` |
-| `struct` | `StructType` |
-
-Complex types (lists, structs) are fully supported.
+Updates existing rows by primary key, inserts new rows.
 
 ## Development
 
 ### Run Tests
 
 ```bash
+# Start Docker services
+docker compose up -d
+
+# Run all tests
 uv run pytest tests/ -v
+
+# Run only unit tests
+uv run pytest tests/ -v -m "not integration"
+
+# Run only integration tests
+uv run pytest tests/ -v -m integration
 ```
 
 ### Project Structure
@@ -223,139 +160,38 @@ uv run pytest tests/ -v
 ```
 dlt-iceberg/
 ├── src/dlt_iceberg/
-│   ├── __init__.py
-│   ├── destination.py          # Main destination implementation
+│   ├── __init__.py              # Public API
+│   ├── destination_client.py   # Class-based destination (atomic commits)
+│   ├── destination.py           # Function-based destination (legacy)
 │   ├── schema_converter.py     # dlt → Iceberg schema conversion
-│   └── partition_builder.py    # Partition spec builder
+│   ├── schema_casting.py        # Arrow table casting
+│   ├── schema_evolution.py     # Schema updates
+│   ├── partition_builder.py    # Partition specs
+│   └── error_handling.py       # Retry logic
 ├── tests/
-│   ├── test_schema_converter.py
-│   └── test_partition_builder.py
+│   ├── test_destination_rest_catalog.py  # Integration tests (Docker)
+│   ├── test_class_based_atomic.py        # Atomic commit tests
+│   ├── test_merge_disposition.py
+│   ├── test_schema_evolution.py
+│   └── ...
 ├── examples/
-│   └── basic_pipeline.py
-├── .dlt/
-│   ├── config.toml
-│   └── secrets.toml.example
-└── pyproject.toml
-```
-
-## Advanced Usage
-
-### Custom Retry Configuration
-
-```python
-pipeline = dlt.pipeline(
-    pipeline_name="my_pipeline",
-    destination=iceberg_rest(
-        max_retries=10,
-        retry_backoff_base=1.5,
-    )
-)
-```
-
-### Multiple Namespaces
-
-```python
-# Production namespace
-pipeline_prod = dlt.pipeline(
-    destination=iceberg_rest(namespace="production")
-)
-
-# Staging namespace
-pipeline_staging = dlt.pipeline(
-    destination=iceberg_rest(namespace="staging")
-)
-```
-
-### Monitoring
-
-The destination logs all operations at INFO level:
-
-```python
-import logging
-logging.basicConfig(level=logging.INFO)
-```
-
-Output:
-```
-INFO:dlt_iceberg.destination:Connecting to REST catalog at https://...
-INFO:dlt_iceberg.destination:Processing table production.events with disposition append
-INFO:dlt_iceberg.destination:Read 1000 rows from /path/to/file.parquet
-INFO:dlt_iceberg.destination:Appending to table production.events
-INFO:dlt_iceberg.destination:Successfully wrote 1000 rows to production.events
+│   ├── incremental_load.py     # CSV incremental loading
+│   ├── merge_load.py            # CSV merge/upsert
+│   └── data/                    # Sample CSV files
+└── docker-compose.yml           # Nessie + MinIO for testing
 ```
 
 ## How It Works
 
-1. **dlt Extract & Normalize**: dlt extracts data from sources and normalizes to Parquet
-2. **Custom Destination**: Destination receives Parquet file paths
-3. **Schema Conversion**: Converts dlt schema to Iceberg schema
-4. **Table Operations**: Uses PyIceberg to create/update tables via REST catalog
-5. **Data Write**: Writes PyArrow data to Iceberg with retry logic
+The class-based destination uses dlt's `JobClientBase` interface to accumulate parquet files during a load and commit them atomically in `complete_load()`:
 
-```
-┌─────────────────┐
-│  dlt pipeline   │
-│ (extract/norm)  │
-└────────┬────────┘
-         │ Parquet files
-         ▼
-┌─────────────────┐
-│ Custom          │
-│ Destination     │
-│ @dlt.destination│
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   PyIceberg     │
-│  REST Catalog   │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Iceberg Tables  │
-│ (S3/GCS/Azure)  │
-└─────────────────┘
-```
+1. dlt extracts data and writes parquet files
+2. Each file is registered in module-level global state
+3. After all files complete, `complete_load()` is called
+4. All files for a table are combined and committed as single Iceberg snapshot
+5. Each table gets one snapshot per load
 
-## Troubleshooting
-
-### Commit Failures
-
-If you see `CommitFailedException`, the destination will automatically retry with exponential backoff. Check:
-- Concurrent writes to the same table
-- Network connectivity
-- Catalog service health
-
-### Schema Evolution
-
-Iceberg supports schema evolution. New columns are automatically added. To modify existing columns, use Iceberg's schema evolution APIs separately.
-
-### Authentication Errors
-
-- **OAuth2**: Verify `client_id`, `client_secret`, and `oauth2_server_uri`
-- **Bearer Token**: Ensure token hasn't expired
-- **AWS SigV4**: Check AWS credentials and IAM permissions
-
-### Table Not Visible
-
-Tables are only registered in the REST catalog. To query:
-- Use tools that support REST catalogs (Spark with REST catalog config, PyIceberg, Trino, etc.)
-- Tables won't appear in AWS Glue Data Catalog unless using Glue REST API
-
-## Limitations
-
-- **Merge/Upsert**: Simplified implementation (delete+insert). For complex merge logic, use Iceberg merge APIs directly
-- **Concurrent Writes**: Multiple writers to same table can cause commit conflicts (retries help but not guaranteed)
-- **Large Transactions**: Very large appends may be slow (batch your data appropriately)
-
-## Contributing
-
-Contributions welcome! Areas for improvement:
-- Advanced merge strategies
-- Table evolution operations
-- Performance optimizations
-- Additional catalog implementations
+This ensures atomic commits even though dlt creates multiple client instances.
 
 ## License
 
@@ -366,5 +202,4 @@ MIT License - see LICENSE file
 - [dlt Documentation](https://dlthub.com/docs)
 - [Apache Iceberg](https://iceberg.apache.org/)
 - [PyIceberg](https://py.iceberg.apache.org/)
-- [Iceberg REST Catalog Spec](https://iceberg.apache.org/rest-catalog-spec/)
-- [Apache Polaris](https://polaris.apache.org/)
+- [Iceberg REST Spec](https://iceberg.apache.org/rest-catalog-spec/)
