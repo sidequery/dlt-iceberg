@@ -1,0 +1,33 @@
+[project]
+name = "sidequery-dlt"
+version = "0.1.0"
+description = "dlt custom destination for Apache Iceberg with REST catalog support"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.40.50",
+    "dlt>=1.17.1",
+    "pandas>=2.3.3",
+    "pyarrow>=21.0.0",
+    "pydantic<2.11",
+    "pyiceberg>=0.10.0",
+    "requests>=2.32.5",
+    "s3fs>=0.4.2",
+    "sqlalchemy>=2.0.44",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sidequery_dlt"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-mock>=3.15.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
