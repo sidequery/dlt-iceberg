@@ -192,5 +192,490 @@ def test_destination_with_nessie_rest_catalog():
     print(f"   Total: 35 rows in Iceberg table")
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not is_nessie_available(),
+    reason="Nessie REST catalog not available. Run: docker compose up -d"
+)
+def test_rest_catalog_atomic_multi_file_commits():
+    """
+    Test atomic multi-file commits with REST catalog.
+
+    Verifies that multiple files are committed in a single Iceberg snapshot,
+    which is the key feature of the class-based destination.
+    """
+    from dlt_iceberg import iceberg_rest
+
+    # Clean up
+    cleanup_catalog = load_catalog(
+        "nessie_cleanup",
+        type="rest",
+        uri="http://localhost:19120/iceberg/main",
+        **{
+            "s3.endpoint": "http://localhost:9000",
+            "s3.access-key-id": "minioadmin",
+            "s3.secret-access-key": "minioadmin",
+            "s3.region": "us-east-1",
+        },
+    )
+    try:
+        cleanup_catalog.drop_table("test_atomic.multi_file_events")
+    except Exception:
+        pass
+
+    @dlt.resource(name="multi_file_events", write_disposition="append")
+    def generate_large_dataset():
+        """Generate enough data to create multiple parquet files."""
+        for i in range(1, 1001):
+            yield {
+                "id": i,
+                "value": i * 100,
+                "category": f"cat_{i % 5}",
+            }
+
+    pipeline = dlt.pipeline(
+        pipeline_name="test_atomic_multi_file",
+        destination=iceberg_rest(
+            catalog_uri="http://localhost:19120/iceberg/main",
+            namespace="test_atomic",
+            s3_endpoint="http://localhost:9000",
+            s3_access_key_id="minioadmin",
+            s3_secret_access_key="minioadmin",
+            s3_region="us-east-1",
+        ),
+        dataset_name="atomic_test",
+    )
+
+    load_info = pipeline.run(generate_large_dataset())
+    assert not load_info.has_failed_jobs
+
+    # Verify data
+    catalog = load_catalog(
+        "nessie_verify",
+        type="rest",
+        uri="http://localhost:19120/iceberg/main",
+        **{
+            "s3.endpoint": "http://localhost:9000",
+            "s3.access-key-id": "minioadmin",
+            "s3.secret-access-key": "minioadmin",
+            "s3.region": "us-east-1",
+        },
+    )
+
+    table = catalog.load_table("test_atomic.multi_file_events")
+    result = table.scan().to_arrow()
+
+    assert len(result) == 1000
+
+    # Verify atomic commit: should have exactly 1 snapshot
+    snapshots = list(table.snapshots())
+    assert len(snapshots) == 1, f"Expected 1 snapshot (atomic commit), got {len(snapshots)}"
+
+    print(f"Atomic multi-file commit verified: 1000 rows in 1 snapshot")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not is_nessie_available(),
+    reason="Nessie REST catalog not available. Run: docker compose up -d"
+)
+def test_rest_catalog_replace_disposition():
+    """Test replace disposition with REST catalog."""
+    from dlt_iceberg import iceberg_rest
+
+    # Clean up
+    cleanup_catalog = load_catalog(
+        "nessie_cleanup",
+        type="rest",
+        uri="http://localhost:19120/iceberg/main",
+        **{
+            "s3.endpoint": "http://localhost:9000",
+            "s3.access-key-id": "minioadmin",
+            "s3.secret-access-key": "minioadmin",
+            "s3.region": "us-east-1",
+        },
+    )
+    try:
+        cleanup_catalog.drop_table("test_replace.sales")
+    except Exception:
+        pass
+
+    @dlt.resource(name="sales", write_disposition="replace")
+    def generate_sales():
+        for i in range(1, 101):
+            yield {
+                "sale_id": i,
+                "region": f"region_{i % 4}",
+                "amount": i * 50,
+            }
+
+    pipeline = dlt.pipeline(
+        pipeline_name="test_replace",
+        destination=iceberg_rest(
+            catalog_uri="http://localhost:19120/iceberg/main",
+            namespace="test_replace",
+            s3_endpoint="http://localhost:9000",
+            s3_access_key_id="minioadmin",
+            s3_secret_access_key="minioadmin",
+            s3_region="us-east-1",
+        ),
+        dataset_name="replace_test",
+    )
+
+    # Initial load
+    load_info = pipeline.run(generate_sales())
+    assert not load_info.has_failed_jobs
+
+    # Verify initial data
+    catalog = load_catalog(
+        "nessie_verify",
+        type="rest",
+        uri="http://localhost:19120/iceberg/main",
+        **{
+            "s3.endpoint": "http://localhost:9000",
+            "s3.access-key-id": "minioadmin",
+            "s3.secret-access-key": "minioadmin",
+            "s3.region": "us-east-1",
+        },
+    )
+
+    table = catalog.load_table("test_replace.sales")
+    result = table.scan().to_arrow()
+    assert len(result) == 100
+
+    # Replace with new data
+    @dlt.resource(name="sales", write_disposition="replace")
+    def new_sales():
+        for i in range(1, 51):
+            yield {
+                "sale_id": i + 1000,
+                "region": f"region_{i % 2}",
+                "amount": i * 100,
+            }
+
+    load_info = pipeline.run(new_sales())
+    assert not load_info.has_failed_jobs
+
+    # Verify replaced data
+    table = catalog.load_table("test_replace.sales")
+    result = table.scan().to_arrow()
+
+    assert len(result) == 50, f"Expected 50 rows after replace, got {len(result)}"
+
+    df = result.to_pandas()
+    assert df["sale_id"].min() == 1001, "Data should be replaced, not appended"
+
+    print(f"Replace disposition verified: {len(result)} rows, old data replaced")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not is_nessie_available(),
+    reason="Nessie REST catalog not available. Run: docker compose up -d"
+)
+def test_rest_catalog_merge_disposition():
+    """Test merge (upsert) disposition with REST catalog."""
+    from dlt_iceberg import iceberg_rest
+
+    # Clean up
+    cleanup_catalog = load_catalog(
+        "nessie_cleanup",
+        type="rest",
+        uri="http://localhost:19120/iceberg/main",
+        **{
+            "s3.endpoint": "http://localhost:9000",
+            "s3.access-key-id": "minioadmin",
+            "s3.secret-access-key": "minioadmin",
+            "s3.region": "us-east-1",
+        },
+    )
+    try:
+        cleanup_catalog.drop_table("test_merge.users")
+    except Exception:
+        pass
+
+    @dlt.resource(name="users", write_disposition="merge", primary_key="user_id")
+    def initial_users():
+        for i in range(1, 11):
+            yield {
+                "user_id": i,
+                "name": f"User {i}",
+                "status": "active",
+            }
+
+    pipeline = dlt.pipeline(
+        pipeline_name="test_merge",
+        destination=iceberg_rest(
+            catalog_uri="http://localhost:19120/iceberg/main",
+            namespace="test_merge",
+            s3_endpoint="http://localhost:9000",
+            s3_access_key_id="minioadmin",
+            s3_secret_access_key="minioadmin",
+            s3_region="us-east-1",
+        ),
+        dataset_name="merge_test",
+    )
+
+    # Initial load
+    load_info = pipeline.run(initial_users())
+    assert not load_info.has_failed_jobs
+
+    # Verify initial data
+    catalog = load_catalog(
+        "nessie_verify",
+        type="rest",
+        uri="http://localhost:19120/iceberg/main",
+        **{
+            "s3.endpoint": "http://localhost:9000",
+            "s3.access-key-id": "minioadmin",
+            "s3.secret-access-key": "minioadmin",
+            "s3.region": "us-east-1",
+        },
+    )
+
+    table = catalog.load_table("test_merge.users")
+    result = table.scan().to_arrow()
+    assert len(result) == 10
+
+    # Merge update: update some existing + add new
+    @dlt.resource(name="users", write_disposition="merge", primary_key="user_id")
+    def updated_users():
+        # Update existing users
+        for i in [1, 2, 3]:
+            yield {
+                "user_id": i,
+                "name": f"User {i}",
+                "status": "inactive",
+            }
+        # Add new users
+        for i in range(11, 16):
+            yield {
+                "user_id": i,
+                "name": f"User {i}",
+                "status": "active",
+            }
+
+    load_info = pipeline.run(updated_users())
+    assert not load_info.has_failed_jobs
+
+    # Verify merged data
+    table = catalog.load_table("test_merge.users")
+    result = table.scan().to_arrow()
+
+    assert len(result) == 15, f"Expected 15 rows after merge, got {len(result)}"
+
+    df = result.to_pandas()
+    inactive_count = len(df[df["status"] == "inactive"])
+    assert inactive_count == 3, f"Expected 3 inactive users, got {inactive_count}"
+
+    print(f"Merge disposition verified: {len(result)} rows, 3 updated to inactive")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not is_nessie_available(),
+    reason="Nessie REST catalog not available. Run: docker compose up -d"
+)
+def test_rest_catalog_incremental_loads():
+    """Test incremental loads with cursor tracking with REST catalog."""
+    from dlt_iceberg import iceberg_rest
+
+    # Clean up
+    cleanup_catalog = load_catalog(
+        "nessie_cleanup",
+        type="rest",
+        uri="http://localhost:19120/iceberg/main",
+        **{
+            "s3.endpoint": "http://localhost:9000",
+            "s3.access-key-id": "minioadmin",
+            "s3.secret-access-key": "minioadmin",
+            "s3.region": "us-east-1",
+        },
+    )
+    try:
+        cleanup_catalog.drop_table("test_incremental.events")
+    except Exception:
+        pass
+
+    base_time = datetime(2024, 1, 1)
+
+    @dlt.resource(name="events", write_disposition="append")
+    def events_batch_1():
+        for i in range(1, 51):
+            yield {
+                "event_id": i,
+                "timestamp": base_time + timedelta(hours=i),
+                "value": i * 10,
+            }
+
+    pipeline = dlt.pipeline(
+        pipeline_name="test_incremental",
+        destination=iceberg_rest(
+            catalog_uri="http://localhost:19120/iceberg/main",
+            namespace="test_incremental",
+            s3_endpoint="http://localhost:9000",
+            s3_access_key_id="minioadmin",
+            s3_secret_access_key="minioadmin",
+            s3_region="us-east-1",
+        ),
+        dataset_name="incremental_test",
+    )
+
+    # Initial load
+    load_info = pipeline.run(events_batch_1())
+    assert not load_info.has_failed_jobs
+
+    # Verify initial data
+    catalog = load_catalog(
+        "nessie_verify",
+        type="rest",
+        uri="http://localhost:19120/iceberg/main",
+        **{
+            "s3.endpoint": "http://localhost:9000",
+            "s3.access-key-id": "minioadmin",
+            "s3.secret-access-key": "minioadmin",
+            "s3.region": "us-east-1",
+        },
+    )
+
+    table = catalog.load_table("test_incremental.events")
+    result = table.scan().to_arrow()
+    assert len(result) == 50
+
+    # Incremental load 2
+    @dlt.resource(name="events", write_disposition="append")
+    def events_batch_2():
+        for i in range(51, 101):
+            yield {
+                "event_id": i,
+                "timestamp": base_time + timedelta(hours=i),
+                "value": i * 10,
+            }
+
+    load_info = pipeline.run(events_batch_2())
+    assert not load_info.has_failed_jobs
+
+    # Verify incremental data
+    table = catalog.load_table("test_incremental.events")
+    result = table.scan().to_arrow()
+
+    assert len(result) == 100, f"Expected 100 rows after incremental load, got {len(result)}"
+
+    df = result.to_pandas()
+    assert df["event_id"].min() == 1
+    assert df["event_id"].max() == 100
+
+    # Verify atomic commits: should have at least 1 snapshot
+    snapshots = list(table.snapshots())
+    assert len(snapshots) >= 1, f"Expected at least 1 snapshot, got {len(snapshots)}"
+
+    print(f"Incremental loads verified: {len(result)} rows")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not is_nessie_available(),
+    reason="Nessie REST catalog not available. Run: docker compose up -d"
+)
+def test_rest_catalog_multiple_tables():
+    """Test loading multiple tables in a single pipeline run with REST catalog."""
+    from dlt_iceberg import iceberg_rest
+
+    # Clean up
+    cleanup_catalog = load_catalog(
+        "nessie_cleanup",
+        type="rest",
+        uri="http://localhost:19120/iceberg/main",
+        **{
+            "s3.endpoint": "http://localhost:9000",
+            "s3.access-key-id": "minioadmin",
+            "s3.secret-access-key": "minioadmin",
+            "s3.region": "us-east-1",
+        },
+    )
+    for table_name in ["orders", "customers", "line_items"]:
+        try:
+            cleanup_catalog.drop_table(f"test_multi.{table_name}")
+        except Exception:
+            pass
+
+    @dlt.resource(name="orders", write_disposition="append")
+    def generate_orders():
+        for i in range(1, 21):
+            yield {
+                "order_id": i,
+                "customer_id": i % 5,
+                "total": i * 100.0,
+            }
+
+    @dlt.resource(name="customers", write_disposition="append")
+    def generate_customers():
+        for i in range(1, 6):
+            yield {
+                "customer_id": i,
+                "name": f"Customer {i}",
+                "email": f"customer{i}@example.com",
+            }
+
+    @dlt.resource(name="line_items", write_disposition="append")
+    def generate_line_items():
+        for i in range(1, 51):
+            yield {
+                "line_item_id": i,
+                "order_id": (i % 20) + 1,
+                "product": f"Product {i % 10}",
+                "quantity": i % 5 + 1,
+            }
+
+    pipeline = dlt.pipeline(
+        pipeline_name="test_multi_table",
+        destination=iceberg_rest(
+            catalog_uri="http://localhost:19120/iceberg/main",
+            namespace="test_multi",
+            s3_endpoint="http://localhost:9000",
+            s3_access_key_id="minioadmin",
+            s3_secret_access_key="minioadmin",
+            s3_region="us-east-1",
+        ),
+        dataset_name="multi_table_test",
+    )
+
+    # Load all three tables
+    load_info = pipeline.run([generate_orders(), generate_customers(), generate_line_items()])
+    assert not load_info.has_failed_jobs
+
+    # Verify all tables
+    catalog = load_catalog(
+        "nessie_verify",
+        type="rest",
+        uri="http://localhost:19120/iceberg/main",
+        **{
+            "s3.endpoint": "http://localhost:9000",
+            "s3.access-key-id": "minioadmin",
+            "s3.secret-access-key": "minioadmin",
+            "s3.region": "us-east-1",
+        },
+    )
+
+    orders_table = catalog.load_table("test_multi.orders")
+    customers_table = catalog.load_table("test_multi.customers")
+    line_items_table = catalog.load_table("test_multi.line_items")
+
+    orders_result = orders_table.scan().to_arrow()
+    customers_result = customers_table.scan().to_arrow()
+    line_items_result = line_items_table.scan().to_arrow()
+
+    assert len(orders_result) == 20
+    assert len(customers_result) == 5
+    assert len(line_items_result) == 50
+
+    # Verify atomic commits: each table should have exactly 1 snapshot
+    assert len(list(orders_table.snapshots())) == 1
+    assert len(list(customers_table.snapshots())) == 1
+    assert len(list(line_items_table.snapshots())) == 1
+
+    print(f"Multiple tables verified: orders={len(orders_result)}, customers={len(customers_result)}, line_items={len(line_items_result)}")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
