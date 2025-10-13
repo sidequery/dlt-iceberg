@@ -1,0 +1,93 @@
+services:
+  # MinIO for S3-compatible storage
+  minio:
+    image: minio/minio:latest
+    container_name: minio-storage
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - minio-data:/data
+
+  # MinIO client to create bucket
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb myminio/warehouse || true;
+      /usr/bin/mc anonymous set public myminio/warehouse;
+      exit 0;
+      "
+
+  # Nessie catalog for Iceberg REST
+  nessie:
+    image: ghcr.io/projectnessie/nessie:0.99.0
+    container_name: nessie-catalog
+    ports:
+      - "19120:19120"
+    environment:
+      # Nessie catalog configuration
+      - nessie.catalog.default-warehouse=warehouse
+      - nessie.catalog.warehouses.warehouse.location=s3://warehouse/
+      # S3 config - endpoint is internal to docker network
+      - nessie.catalog.service.s3.default-options.endpoint=http://minio:9000
+      # external-endpoint is what clients outside docker should use
+      - nessie.catalog.service.s3.default-options.external-endpoint=http://localhost:9000
+      - nessie.catalog.service.s3.default-options.path-style-access=true
+      - nessie.catalog.service.s3.default-options.region=us-east-1
+      # S3 credentials using secret reference
+      - nessie.catalog.service.s3.default-options.access-key=urn:nessie-secret:quarkus:nessie.catalog.secrets.access-key
+      - nessie.catalog.secrets.access-key.name=minioadmin
+      - nessie.catalog.secrets.access-key.secret=minioadmin
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:19120/api/v2/config"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Polaris catalog with AWS credentials for MinIO access
+  polaris:
+    image: apache/polaris:latest
+    container_name: polaris-catalog
+    ports:
+      - "8181:8181"
+      - "8182:8182"
+    environment:
+      # AWS credentials so Polaris can access MinIO
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_REGION=us-east-1
+      # Disable STS for MinIO compatibility
+      - POLARIS_FEATURES_DEFAULT_ALLOW_EXTERNAL_TABLE_LOCATION=true
+      - POLARIS_FEATURES_DEFAULT_ALLOW_UNSTRUCTURED_TABLE_LOCATION=true
+      # Use S3 endpoint override for MinIO
+      - AWS_S3_ENDPOINT=http://minio:9000
+      - AWS_S3_PATH_STYLE_ACCESS=true
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8181/api/catalog/v1/config?warehouse=polaris_catalog"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  minio-data:
