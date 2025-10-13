@@ -237,7 +237,7 @@ class TestDestinationErrorHandling:
             }
 
             # Test with ValidationError (non-retryable)
-            with patch("dlt_iceberg.destination._get_or_create_catalog") as mock_catalog:
+            with patch("dlt_iceberg.destination.load_catalog") as mock_catalog:
                 mock_catalog_instance = MagicMock()
                 mock_catalog.return_value = mock_catalog_instance
 
@@ -285,7 +285,7 @@ class TestDestinationErrorHandling:
                 "write_disposition": "append",
             }
 
-            with patch("dlt_iceberg.destination._get_or_create_catalog") as mock_catalog:
+            with patch("dlt_iceberg.destination.load_catalog") as mock_catalog:
                 mock_catalog_instance = MagicMock()
                 mock_catalog.return_value = mock_catalog_instance
 
@@ -337,7 +337,7 @@ class TestDestinationErrorHandling:
                 "write_disposition": "append",
             }
 
-            with patch("dlt_iceberg.destination._get_or_create_catalog") as mock_catalog:
+            with patch("dlt_iceberg.destination.load_catalog") as mock_catalog:
                 mock_catalog_instance = MagicMock()
                 mock_catalog.return_value = mock_catalog_instance
 

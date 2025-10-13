@@ -477,7 +477,7 @@ class IcebergRestClient(JobClientBase):
                     raise ValueError(f"Unknown write disposition: {write_disposition}")
 
                 logger.info(
-                    f"✓ Successfully committed {len(file_data)} files "
+                    f"Successfully committed {len(file_data)} files "
                     f"({total_rows} rows) to {identifier}"
                 )
                 return  # Success

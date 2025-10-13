@@ -78,8 +78,9 @@ def test_class_based_atomic_commits():
         print("\nVerifying atomic commit...")
         from pyiceberg.catalog import load_catalog
 
+        # Use same catalog name as destination to share SQLite connection
         catalog = load_catalog(
-            "verify",
+            "dlt_catalog",
             type="sql",
             uri=f"sqlite:///{catalog_path}",
             warehouse=f"file://{warehouse_path}",
@@ -170,8 +171,9 @@ def test_class_based_multiple_tables():
         print("\nVerifying atomic commits per table...")
         from pyiceberg.catalog import load_catalog
 
+        # Use same catalog name as destination to share SQLite connection
         catalog = load_catalog(
-            "verify",
+            "dlt_catalog",
             type="sql",
             uri=f"sqlite:///{catalog_path}",
             warehouse=f"file://{warehouse_path}",
@@ -261,8 +263,9 @@ def test_class_based_incremental():
         print("\nVerifying incremental snapshots...")
         from pyiceberg.catalog import load_catalog
 
+        # Use same catalog name as destination to share SQLite connection
         catalog = load_catalog(
-            "verify",
+            "dlt_catalog",
             type="sql",
             uri=f"sqlite:///{catalog_path}",
             warehouse=f"file://{warehouse_path}",
