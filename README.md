@@ -6,6 +6,7 @@ A [dlt](https://dlthub.com/) destination for [Apache Iceberg](https://iceberg.ap
 
 - **Atomic Multi-File Commits**: Multiple parquet files committed as single Iceberg snapshot per table
 - **REST Catalog Support**: Works with Nessie, Polaris, AWS Glue, Unity Catalog
+- **Partitioning**: Full support for Iceberg partition transforms (temporal, bucket, truncate, identity)
 - **Authentication**: OAuth2, Bearer token, AWS SigV4
 - **Write Dispositions**: Append, replace, merge (upsert)
 - **Schema Evolution**: Automatic schema updates when adding columns
@@ -115,6 +116,47 @@ iceberg_rest(
     token="<databricks-token>",
 )
 ```
+
+## Partitioning
+
+Mark columns for partitioning using dlt column hints:
+
+```python
+@dlt.resource(
+    name="events",
+    columns={
+        "event_date": {
+            "data_type": "date",
+            "partition": True,
+            "partition_transform": "day",  # Optional: year, month, day, hour
+        },
+        "region": {
+            "data_type": "text",
+            "partition": True,  # Uses identity transform for strings
+        },
+        "user_id": {
+            "data_type": "bigint",
+            "partition": True,
+            "partition_transform": "bucket[10]",  # Hash into 10 buckets
+        }
+    }
+)
+def events():
+    ...
+```
+
+### Available Transforms
+
+- **Temporal**: `year`, `month`, `day`, `hour` (for timestamp/date columns)
+- **Identity**: No transformation (default for string/integer)
+- **Bucket**: `bucket[N]` - Hash-based partitioning into N buckets
+- **Truncate**: `truncate[N]` - Truncate strings/integers to N width
+
+### Default Behavior
+
+If `partition_transform` is not specified:
+- Timestamp/date columns default to `month`
+- String/integer columns default to `identity`
 
 ## Write Dispositions
 

@@ -151,9 +151,10 @@ def build_partition_spec(
     partition_columns = []
 
     # Extract partition columns from dlt hints
+    # Support both 'partition' and 'x-partition' (custom hint)
     dlt_columns = dlt_table.get("columns", {})
     for col_name, col_info in dlt_columns.items():
-        if col_info.get("partition"):
+        if col_info.get("partition") or col_info.get("x-partition"):
             partition_columns.append(col_name)
 
     if not partition_columns:
@@ -234,7 +235,8 @@ def choose_partition_transform(field_type, col_name: str, col_hints: dict):
         col_hints = {"partition_transform": "month"}
     """
     # Check if user specified a transform in hints
-    partition_transform = col_hints.get("partition_transform")
+    # Support both 'partition_transform' and 'x-partition-transform' (custom hint)
+    partition_transform = col_hints.get("partition_transform") or col_hints.get("x-partition-transform")
 
     if partition_transform:
         # Parse the transform hint

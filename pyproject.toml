@@ -9,7 +9,7 @@ dependencies = [
     "pandas>=2.3.3",
     "pyarrow>=21.0.0",
     "pydantic<2.11",
-    "pyiceberg>=0.10.0",
+    "pyiceberg[pyiceberg-core]>=0.10.0",
     "requests>=2.32.5",
     "s3fs>=0.4.2",
     "sqlalchemy>=2.0.44",
