@@ -31,3 +31,6 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "integration: marks tests as integration tests that require external services (docker compose)",
+]

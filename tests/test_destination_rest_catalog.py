@@ -1,21 +1,59 @@
 """
 REAL REST CATALOG E2E TEST: Uses actual Nessie REST catalog.
 This proves the destination works with real REST catalogs like Nessie, Polaris, AWS Glue, etc.
+
+Prerequisites:
+    1. Start docker services:
+       docker compose up -d
+
+    2. Wait for services to be healthy (Nessie takes ~30 seconds):
+       docker compose ps
+
+    3. Verify Nessie is ready:
+       curl http://localhost:19120/api/v2/config
+
+    4. Run this test:
+       uv run pytest tests/test_destination_rest_catalog.py -v -s
+
+Services required:
+    - Nessie (REST catalog): http://localhost:19120
+    - MinIO (S3 storage): http://localhost:9000
 """
 
 import pytest
 import dlt
+import requests
 from datetime import datetime, timedelta
 from pyiceberg.catalog import load_catalog
 
 
+def is_nessie_available():
+    """Check if Nessie REST catalog is accessible."""
+    try:
+        response = requests.get("http://localhost:19120/api/v2/config", timeout=2)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
 @pytest.mark.integration
+@pytest.mark.skipif(
+    not is_nessie_available(),
+    reason="Nessie REST catalog not available. Run: docker compose up -d"
+)
 def test_destination_with_nessie_rest_catalog():
     """
     END-TO-END TEST with Nessie REST catalog.
 
-    Prerequisites:
-    - docker compose up (runs Nessie + MinIO)
+    This test verifies:
+    1. dlt pipeline creation with REST catalog
+    2. Initial data load (25 rows)
+    3. Data verification in Nessie catalog
+    4. Incremental load (10 more rows)
+    5. Total data verification (35 rows)
+
+    The test cleans up before running (drops table if exists)
+    so it can be run multiple times reliably.
     """
     base_time = datetime(2024, 1, 1)
 
