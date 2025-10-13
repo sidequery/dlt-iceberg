@@ -1,0 +1,88 @@
+Reading inline script metadata from `usgs_earthquakes.py`
+Installed 60 packages in 340ms
+Loading 190 months of earthquake data from 2010-01-01 to 2025-10-12...
+
+Fetching earthquakes from 2010-01-01 to 2010-02-01...
+Retrieved 9923 earthquakes
+Traceback (most recent call last):
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/extract/pipe_iterator.py", line 274, in _get_source_item
+    pipe_item = next(gen)
+  File "/Users/nico/Code/sidequery-dlt/examples/usgs_earthquakes.py", line 107, in fetch_earthquakes
+    "time": datetime.fromtimestamp(props["time"] / 1000) if props.get("time") else None,
+            ^^^^^^^^
+UnboundLocalError: cannot access local variable 'datetime' where it is not associated with a value
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/pipeline/pipeline.py", line 476, in extract
+    self._extract_source(
+    ~~~~~~~~~~~~~~~~~~~~^
+        extract_step,
+        ^^^^^^^^^^^^^
+    ...<3 lines>...
+        refresh=refresh or self.refresh,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/pipeline/pipeline.py", line 1308, in _extract_source
+    load_id = extract.extract(
+        source, max_parallel_items, workers, load_package_state_update=load_package_state_update
+    )
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/extract/extract.py", line 473, in extract
+    self._extract_single_source(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        load_id,
+        ^^^^^^^^
+    ...<2 lines>...
+        workers=workers,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/extract/extract.py", line 397, in _extract_single_source
+    for pipe_item in pipes:
+                     ^^^^^
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/extract/pipe_iterator.py", line 158, in __next__
+    pipe_item = self._get_source_item()
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/extract/pipe_iterator.py", line 304, in _get_source_item
+    raise ResourceExtractionError(pipe.name, gen, str(ex), "generator") from ex
+dlt.extract.exceptions.ResourceExtractionError: In processing pipe `earthquakes`: extraction of resource `earthquakes` in `generator` `fetch_earthquakes` caused an exception: cannot access local variable 'datetime' where it is not associated with a value
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/nico/Code/sidequery-dlt/examples/usgs_earthquakes.py", line 234, in <module>
+    main()
+    ~~~~^^
+  File "/Users/nico/Code/sidequery-dlt/examples/usgs_earthquakes.py", line 183, in main
+    load_info = pipeline.run(earthquakes_batch())
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/pipeline/pipeline.py", line 223, in _wrap
+    step_info = f(self, *args, **kwargs)
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/pipeline/pipeline.py", line 272, in _wrap
+    return f(self, *args, **kwargs)
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/pipeline/pipeline.py", line 724, in run
+    self.extract(
+    ~~~~~~~~~~~~^
+        data,
+        ^^^^^
+    ...<8 lines>...
+        loader_file_format=loader_file_format,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/pipeline/pipeline.py", line 223, in _wrap
+    step_info = f(self, *args, **kwargs)
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/pipeline/pipeline.py", line 177, in _wrap
+    rv = f(self, *args, **kwargs)
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/pipeline/pipeline.py", line 163, in _wrap
+    return f(self, *args, **kwargs)
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/pipeline/pipeline.py", line 272, in _wrap
+    return f(self, *args, **kwargs)
+  File "/Users/nico/.cache/uv/archive-v0/6bPdJD5TjlWUrQz91CSnF/lib/python3.13/site-packages/dlt/pipeline/pipeline.py", line 497, in extract
+    raise PipelineStepFailed(
+    ...<5 lines>...
+    ) from exc
+dlt.pipeline.exceptions.PipelineStepFailed: Pipeline execution failed at `step=extract` when processing package with `load_id=1760337324.066329` with exception:
+
+<class 'dlt.extract.exceptions.ResourceExtractionError'>
+In processing pipe `earthquakes`: extraction of resource `earthquakes` in `generator` `fetch_earthquakes` caused an exception: cannot access local variable 'datetime' where it is not associated with a value

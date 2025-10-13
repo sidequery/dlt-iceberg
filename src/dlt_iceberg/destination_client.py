@@ -94,7 +94,7 @@ class IcebergRestConfiguration(DestinationClientConfiguration):
     strict_casting: bool = False
 
     # Merge batch size (for upsert operations to avoid memory issues)
-    merge_batch_size: int = 100000
+    merge_batch_size: int = 500000
 
 
 class IcebergRestLoadJob(RunnableLoadJob):

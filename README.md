@@ -95,7 +95,7 @@ iceberg_rest(
     # Performance tuning
     max_retries=5,               # Retry attempts for transient failures
     retry_backoff_base=2.0,      # Exponential backoff multiplier
-    merge_batch_size=100000,     # Rows per batch for merge operations
+    merge_batch_size=500000,     # Rows per batch for merge operations
     strict_casting=False,        # Fail on potential data loss
 )
 ```
