@@ -1,3 +1,11 @@
+#!/usr/bin/env -S uv run
+# /// script
+# dependencies = [
+#     "dlt",
+#     "dlt-iceberg",
+#     "pyiceberg",
+# ]
+# ///
 """
 Incremental Load Example
 
