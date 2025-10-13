@@ -1,40 +1,98 @@
 # Testing Guide
 
-This project includes comprehensive tests for the Iceberg REST destination, covering both SQL catalogs (SQLite) and REST catalogs (Nessie).
+Comprehensive test suite for the dlt-iceberg destination covering SQL catalogs (SQLite) and REST catalogs (Nessie).
 
-## Test Types
+## Quick Start
 
-### 1. SQL Catalog Test (No Docker Required)
-**File:** `tests/test_destination_e2e.py`
+```bash
+# Run all tests (except integration tests requiring Docker)
+uv run pytest tests/ -m "not integration" -v
 
-Uses SQLite-based catalog for testing. No external dependencies required.
+# Run everything including integration tests
+docker compose up -d
+uv run pytest tests/ -v
+```
+
+## Core Test Files
+
+### Unit Tests (No External Dependencies)
+
+**Schema Conversion** - `tests/test_schema_converter.py`
+Tests dlt → Iceberg schema conversion for all data types.
+
+```bash
+uv run pytest tests/test_schema_converter.py -v
+```
+
+**Partition Building** - `tests/test_partition_builder.py`
+Tests partition spec generation from dlt hints.
+
+```bash
+uv run pytest tests/test_partition_builder.py -v
+```
+
+**Schema Casting** - `tests/test_schema_casting.py`
+Tests safe type casting with data loss detection.
+
+```bash
+uv run pytest tests/test_schema_casting.py -v
+```
+
+**Error Handling** - `tests/test_error_handling.py`
+Tests retry logic and error categorization.
+
+```bash
+uv run pytest tests/test_error_handling.py -v
+```
+
+### End-to-End Tests (SQLite Catalog)
+
+**Basic E2E** - `tests/test_destination_e2e.py`
+Full pipeline test using SQLite catalog (no Docker).
 
 ```bash
 uv run pytest tests/test_destination_e2e.py -v
 ```
 
-### 2. REST Catalog Integration Test (Docker Required)
-**File:** `tests/test_destination_rest_catalog.py`
+**Atomic Commits** - `tests/test_class_based_atomic.py`
+Tests that multiple files are committed atomically in a single Iceberg snapshot.
 
-Tests against actual Nessie REST catalog with MinIO S3 storage. **VERIFIED ROBUST AND RELIABLE.**
+```bash
+uv run pytest tests/test_class_based_atomic.py -v
+```
+
+**Merge Disposition** - `tests/test_merge_disposition.py`
+Tests upsert logic with primary keys.
+
+```bash
+uv run pytest tests/test_merge_disposition.py -v
+```
+
+**Schema Evolution** - `tests/test_schema_evolution.py`
+Tests adding columns and type promotions.
+
+```bash
+uv run pytest tests/test_schema_evolution.py -v
+```
+
+### Integration Tests (Require Docker)
+
+**REST Catalog** - `tests/test_destination_rest_catalog.py`
+Tests against Nessie REST catalog with MinIO S3 storage. **VERIFIED ROBUST.**
 
 **Prerequisites:**
-1. Start docker services:
-   ```bash
-   docker compose up -d
-   ```
+```bash
+# Start services
+docker compose up -d
 
-2. Wait for services to be healthy (Nessie takes ~30 seconds):
-   ```bash
-   docker compose ps
-   ```
+# Wait for Nessie to be ready (~30 seconds)
+docker compose ps
 
-3. Verify Nessie is ready:
-   ```bash
-   curl http://localhost:19120/api/v2/config
-   ```
+# Verify Nessie
+curl http://localhost:19120/api/v2/config
+```
 
-**Run the test:**
+**Run:**
 ```bash
 uv run pytest tests/test_destination_rest_catalog.py -v -s
 ```
@@ -44,92 +102,73 @@ uv run pytest tests/test_destination_rest_catalog.py -v -s
 - MinIO (S3 storage): http://localhost:9000
 - MinIO Console: http://localhost:9001
 
-## Running All Tests
+## Test Markers
 
 ```bash
-# Run all tests
-uv run pytest tests/ -v
-
-# Run only integration tests
+# Run only integration tests (require Docker)
 uv run pytest -m integration -v
 
 # Skip integration tests
 uv run pytest -m "not integration" -v
-
-# Run both catalog tests
-uv run pytest tests/test_destination_e2e.py tests/test_destination_rest_catalog.py -v
 ```
 
-## Test Markers
+## Test Coverage
 
-- `@pytest.mark.integration`: Tests that require external services (docker compose)
+### What's Tested
 
-The REST catalog test will automatically skip if Nessie is not available.
+✓ Schema conversion (dlt → Iceberg, all types)
+✓ Partition building (temporal and identity transforms)
+✓ Type support (primitives, lists, structs, nested)
+✓ Write dispositions (append, replace, merge)
+✓ Atomic commits (multiple files → single snapshot)
+✓ Schema evolution (add columns, type promotions)
+✓ Error handling and retries
+✓ OAuth2 authentication (for REST catalogs)
+✓ REST catalog integration (Nessie + MinIO)
 
-## Reliability Features
+### Architecture
 
-The REST catalog test is designed to be robust and reliable:
+The destination has two implementations:
 
-1. **Cleanup before each run:** Drops existing table to ensure clean state
-2. **Health checks:** Skips if Nessie is not available
-3. **Proper error handling:** Fails clearly if load has errors
-4. **No race conditions:** Waits for services to be healthy
-5. **Idempotent:** Can be run multiple times without issues
-6. **Verified:** 6+ consecutive runs without failure
+1. **Function-based** (`destination.py`) - Legacy, commits per file
+2. **Class-based** (`destination_client.py`) - Current, atomic multi-file commits
 
-## Legacy Tests (Deprecated)
+Both are tested. The class-based version is the recommended default.
 
-The following test files are outdated and may not work:
-- `test_schema_converter.py`
-- `test_partition_builder.py`
-- `test_smoke.py`
-- `test_integration.py`
+## Running Specific Tests
 
-Use the new E2E tests instead (`test_destination_e2e.py` and `test_destination_rest_catalog.py`).
+```bash
+# All unit tests
+uv run pytest tests/test_schema_converter.py tests/test_partition_builder.py tests/test_schema_casting.py -v
 
-## Test Summary
+# All E2E tests (SQLite)
+uv run pytest tests/test_destination_e2e.py tests/test_class_based_atomic.py tests/test_merge_disposition.py -v
 
-### What Works (Validated)
+# Only integration tests
+uv run pytest -m integration -v
 
-✓ **Schema Conversion**: dlt schema → Iceberg schema with all types
-✓ **Partition Building**: Temporal and identity transforms
-✓ **Type Support**: Primitives, lists, structs, nested types
-✓ **Write Dispositions**: Append, replace, merge logic
-✓ **OAuth2 Authentication**: Scope handling for Polaris
-✓ **Configuration**: All destination parameters
-
-### What's Tested End-to-End (Pending Polaris Setup)
-
-The integration tests demonstrate:
-- Full pipeline execution with dlt
-- Data writing to Iceberg via REST catalog
-- Reading data back from tables
-- Partition verification
-- Complex type persistence
-- Incremental loading
+# Specific test function
+uv run pytest tests/test_class_based_atomic.py::test_class_based_atomic_commits -v
+```
 
 ## Manual Testing
 
-### Test with Local Polaris
-
-If you want to test manually:
+### Test with SQLite Catalog
 
 ```python
 import dlt
 from datetime import datetime
-from sidequery_dlt import iceberg_rest
+from dlt_iceberg import iceberg_rest
 
-@dlt.resource(name="test_events")
+@dlt.resource(name="test_events", write_disposition="append")
 def events():
-    yield {"id": 1, "timestamp": datetime.now()}
+    yield {"id": 1, "timestamp": datetime.now(), "value": 100}
 
 pipeline = dlt.pipeline(
     pipeline_name="test",
     destination=iceberg_rest(
-        catalog_uri="http://localhost:8181/api/catalog",
-        warehouse="file:///tmp/warehouse",  # Or s3://bucket
-        credential="<client-id>:<secret>",
-        oauth2_server_uri="http://localhost:8181/api/catalog/v1/oauth/tokens",
+        catalog_uri="sqlite:////tmp/catalog.db",
+        warehouse="file:///tmp/warehouse",
         namespace="test",
     ),
 )
@@ -138,19 +177,54 @@ info = pipeline.run(events())
 print(info)
 ```
 
-### Verify Data was Written
+### Test with Nessie REST Catalog
+
+```python
+import dlt
+from datetime import datetime
+from dlt_iceberg import iceberg_rest
+
+@dlt.resource(name="test_events", write_disposition="append")
+def events():
+    yield {"id": 1, "timestamp": datetime.now(), "value": 100}
+
+pipeline = dlt.pipeline(
+    pipeline_name="test",
+    destination=iceberg_rest(
+        catalog_uri="http://localhost:19120/iceberg/main",
+        warehouse="s3://warehouse",  # MinIO bucket
+        namespace="test",
+        s3_endpoint="http://localhost:9000",
+        s3_access_key_id="minioadmin",
+        s3_secret_access_key="minioadmin",
+    ),
+)
+
+info = pipeline.run(events())
+print(info)
+```
+
+### Verify Data
 
 ```python
 from pyiceberg.catalog import load_catalog
 
+# SQLite catalog
+catalog = load_catalog(
+    "test",
+    type="sql",
+    uri="sqlite:////tmp/catalog.db",
+    warehouse="file:///tmp/warehouse",
+)
+
+# Nessie catalog
 catalog = load_catalog(
     "test",
     type="rest",
-    uri="http://localhost:8181/api/catalog",
-    credential="<client-id>:<secret>",
-    oauth2-server-uri="http://localhost:8181/api/catalog/v1/oauth/tokens",
-    warehouse="file:///tmp/warehouse",
-    scope="PRINCIPAL_ROLE:ALL",
+    uri="http://localhost:19120/iceberg/main",
+    s3.endpoint="http://localhost:9000",
+    s3.access-key-id="minioadmin",
+    s3.secret-access-key="minioadmin",
 )
 
 table = catalog.load_table("test.test_events")
@@ -160,43 +234,51 @@ print(df)
 
 ## Continuous Integration
 
-For CI/CD pipelines:
+For CI/CD:
 
 ```bash
-# Run only unit tests (no external dependencies)
-uv run pytest tests/ --ignore=tests/test_integration.py
+# Run only unit tests (no Docker)
+uv run pytest tests/ -m "not integration" -v
 
-# CI should pass with 15 tests
+# Run with Docker services
+docker compose up -d
+uv run pytest tests/ -v
+docker compose down
 ```
-
-## Test Coverage
-
-- **Core Functionality**: 100% covered by unit tests
-- **Schema Conversion**: 100% covered
-- **Partition Building**: 100% covered
-- **End-to-End Flows**: Example code in integration tests
 
 ## Troubleshooting
 
-**Import Errors**:
+**Import Errors:**
 ```bash
-# Ensure packages are installed
 uv sync
 ```
 
-**Integration Test Failures**:
-- Check Polaris is running: `docker compose ps`
-- Verify OAuth credentials match Polaris logs
-- Ensure warehouse is configured in Polaris catalog
+**Integration Test Failures:**
+- Check services: `docker compose ps`
+- Verify Nessie: `curl http://localhost:19120/api/v2/config`
+- Check MinIO: `curl http://localhost:9000/minio/health/live`
+- View logs: `docker compose logs nessie`
 
-**Slow Tests**:
-- Use `-k pattern` to run specific tests
-- Skip integration tests for fast feedback
+**Slow Tests:**
+```bash
+# Run specific test
+uv run pytest tests/test_schema_converter.py::test_convert_arrow_to_iceberg_basic_types -v
 
-## Future Improvements
+# Skip slow integration tests
+uv run pytest -m "not integration" -v
+```
 
-- [ ] Automate Polaris warehouse setup
-- [ ] Add tests for AWS Glue REST catalog
-- [ ] Add tests for Unity Catalog
-- [ ] Performance benchmarks
-- [ ] Concurrent write tests
+**Test Isolation:**
+
+All E2E tests create temporary directories and SQLite databases to avoid conflicts.
+
+## Test Reliability
+
+The REST catalog test (`test_destination_rest_catalog.py`) is designed for reliability:
+
+1. Cleanup before each run (drops existing table)
+2. Health checks (skips if Nessie unavailable)
+3. Proper error handling
+4. No race conditions
+5. Idempotent (can run multiple times)
+6. Verified: 6+ consecutive runs without failure
