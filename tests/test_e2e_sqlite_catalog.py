@@ -39,11 +39,11 @@ def test_e2e_sqlite_catalog_write():
                 "warehouse": f"file://{warehouse}",
             }
         )
-        print(f"✅ Catalog created")
+        print(f"Catalog created")
 
         # Create namespace
         catalog.create_namespace("analytics")
-        print(f"✅ Namespace 'analytics' created")
+        print(f"Namespace 'analytics' created")
 
         # Import dlt resources
         import dlt
@@ -70,7 +70,7 @@ def test_e2e_sqlite_catalog_write():
             identifier="analytics.events",
             schema=schema,
         )
-        print(f"✅ Table created: analytics.events")
+        print(f"Table created: analytics.events")
         print(f"   Location: {table.location()}")
 
         # Create sample data
@@ -87,15 +87,15 @@ def test_e2e_sqlite_catalog_write():
         }
         arrow_table = pa.table(data)
 
-        print(f"✅ Created test data: {len(arrow_table)} rows")
+        print(f"Created test data: {len(arrow_table)} rows")
 
         # Append data to table
         table.append(arrow_table)
-        print(f"✅ Data appended to Iceberg table")
+        print(f"Data appended to Iceberg table")
 
         # Read back and verify
         result = table.scan().to_arrow()
-        print(f"✅ Data read back: {len(result)} rows")
+        print(f"Data read back: {len(result)} rows")
 
         df = result.to_pandas()
 
@@ -106,12 +106,12 @@ def test_e2e_sqlite_catalog_write():
         assert df["user_id"].nunique() == 10
         assert abs(df["revenue"].sum() - sum(i * 1.5 for i in range(100))) < 0.01
 
-        print(f"✅ Data verified!")
+        print(f"Data verified")
         print(f"\nSample data:")
         print(df.head(10))
 
         # Test incremental append
-        print(f"\n📦 Testing incremental append...")
+        print(f"\nTesting incremental append...")
 
         more_data = {
             "event_id": list(range(101, 151)),
@@ -124,10 +124,10 @@ def test_e2e_sqlite_catalog_write():
 
         result2 = table.scan().to_arrow()
         assert len(result2) == 150
-        print(f"✅ Incremental append works: {len(result2)} total rows")
+        print(f"Incremental append works: {len(result2)} total rows")
 
         # Test filtering
-        print(f"\n🔍 Testing scan with filter...")
+        print(f"\nTesting scan with filter...")
         from pyiceberg.expressions import EqualTo
 
         filtered = table.scan(
@@ -135,18 +135,18 @@ def test_e2e_sqlite_catalog_write():
         ).to_arrow()
 
         df_filtered = filtered.to_pandas()
-        print(f"✅ Filtered scan: {len(filtered)} rows (user_id = 5)")
+        print(f"Filtered scan: {len(filtered)} rows (user_id = 5)")
         assert all(df_filtered["user_id"] == 5)
 
-        print(f"\n🎉 SUCCESS! SQLite catalog fully functional for E2E tests!")
+        print(f"\nSQLite catalog functional for e2e tests")
         print(f"\nSummary:")
-        print(f"   ✅ Created SQLite catalog with file warehouse")
-        print(f"   ✅ Created namespace and table")
-        print(f"   ✅ Appended 100 rows")
-        print(f"   ✅ Read and verified data")
-        print(f"   ✅ Incremental append (50 more rows)")
-        print(f"   ✅ Filtered scan (predicate pushdown)")
-        print(f"   ✅ Total: 150 rows in Iceberg table")
+        print(f"   Created SQLite catalog with file warehouse")
+        print(f"   Created namespace and table")
+        print(f"   Appended 100 rows")
+        print(f"   Read and verified data")
+        print(f"   Incremental append (50 more rows)")
+        print(f"   Filtered scan (predicate pushdown)")
+        print(f"   Total: 150 rows in Iceberg table")
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

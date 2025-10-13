@@ -1,6 +1,6 @@
 """
-REAL REST CATALOG E2E TEST: Uses actual Nessie REST catalog.
-This proves the destination works with real REST catalogs like Nessie, Polaris, AWS Glue, etc.
+REST catalog e2e test using Nessie REST catalog.
+Tests integration with REST catalogs like Nessie, Polaris, AWS Glue, etc.
 
 Prerequisites:
     1. Start docker services:
@@ -43,7 +43,7 @@ def is_nessie_available():
 )
 def test_destination_with_nessie_rest_catalog():
     """
-    END-TO-END TEST with Nessie REST catalog.
+    End-to-end test with Nessie REST catalog.
 
     This test verifies:
     1. dlt pipeline creation with REST catalog
@@ -68,12 +68,12 @@ def test_destination_with_nessie_rest_catalog():
                 "value": i * 10,
             }
 
-    print(f"\n✅ Created test data generator")
+    print(f"\nCreated test data generator")
 
     from dlt_iceberg import iceberg_rest  # Class-based with atomic commits
 
     # Clean up: Drop table if exists from previous runs
-    print(f"\n🧹 Cleaning up from previous test runs...")
+    print(f"\nCleaning up from previous test runs...")
     cleanup_catalog = load_catalog(
         "nessie_cleanup",
         type="rest",
@@ -87,9 +87,9 @@ def test_destination_with_nessie_rest_catalog():
     )
     try:
         cleanup_catalog.drop_table("analytics.events")
-        print(f"✅ Dropped existing table analytics.events")
+        print(f"Dropped existing table analytics.events")
     except Exception as e:
-        print(f"ℹ️  No existing table to drop: {e}")
+        print(f"No existing table to drop: {e}")
 
     # Create dlt pipeline with Nessie REST catalog
     pipeline = dlt.pipeline(
@@ -105,20 +105,20 @@ def test_destination_with_nessie_rest_catalog():
         dataset_name="test_dataset",
     )
 
-    print(f"✅ Created dlt pipeline with Nessie REST catalog")
+    print(f"Created dlt pipeline with Nessie REST catalog")
 
     # Load data through dlt
-    print(f"\n✍️  Loading data through Nessie REST catalog...")
+    print(f"\nLoading data through Nessie REST catalog...")
     load_info = pipeline.run(generate_events())
 
-    print(f"✅ DLT LOAD COMPLETED!")
+    print(f"DLT load completed")
     print(f"   Has failed jobs: {load_info.has_failed_jobs}")
     if load_info.has_failed_jobs:
         print(f"   Failed jobs: {load_info.failed_jobs}")
         raise AssertionError("Load had failed jobs!")
 
     # Verify data in Nessie catalog
-    print(f"\n🔍 Verifying data in Nessie REST catalog...")
+    print(f"\nVerifying data in Nessie REST catalog...")
 
     catalog = load_catalog(
         "nessie_verify",
@@ -141,11 +141,11 @@ def test_destination_with_nessie_rest_catalog():
 
     # Load table
     table = catalog.load_table("analytics.events")
-    print(f"✅ Loaded table from Nessie: {table.name()}")
+    print(f"Loaded table from Nessie: {table.name()}")
 
     # Scan data
     result = table.scan().to_arrow()
-    print(f"✅ Scanned data: {len(result)} rows")
+    print(f"Scanned data: {len(result)} rows")
 
     # Verify
     assert len(result) == 25, f"Expected 25 rows, got {len(result)}"
@@ -155,12 +155,12 @@ def test_destination_with_nessie_rest_catalog():
     assert df["event_id"].max() == 25
     assert len(df["event_type"].unique()) == 3
 
-    print(f"✅ Data verified!")
+    print(f"Data verified")
     print(f"\nSample data:")
     print(df.head(10))
 
     # Test incremental load
-    print(f"\n📦 Testing incremental load...")
+    print(f"\nTesting incremental load...")
 
     @dlt.resource(name="events", write_disposition="append")
     def generate_more_events():
@@ -174,23 +174,22 @@ def test_destination_with_nessie_rest_catalog():
             }
 
     load_info2 = pipeline.run(generate_more_events())
-    print(f"✅ Incremental load completed")
+    print(f"Incremental load completed")
 
     # Verify incremental data
     table = catalog.load_table("analytics.events")
     result2 = table.scan().to_arrow()
     assert len(result2) == 35, f"Expected 35 rows after increment, got {len(result2)}"
 
-    print(f"✅ Incremental data verified: {len(result2)} total rows")
+    print(f"Incremental data verified: {len(result2)} total rows")
 
-    print(f"\n🎉 SUCCESS! DESTINATION WORKS WITH NESSIE REST CATALOG!")
-    print(f"\n Summary:")
-    print(f"   ✅ Created dlt pipeline with Nessie REST catalog")
-    print(f"   ✅ Loaded 25 rows through dlt")
-    print(f"   ✅ Verified data in Nessie REST catalog")
-    print(f"   ✅ Incremental load added 10 more rows")
-    print(f"   ✅ Total: 35 rows in Iceberg table")
-    print(f"\n THIS PROVES REST CATALOG WORKS!")
+    print(f"\nDestination works with Nessie REST catalog")
+    print(f"\nSummary:")
+    print(f"   Created dlt pipeline with Nessie REST catalog")
+    print(f"   Loaded 25 rows through dlt")
+    print(f"   Verified data in Nessie REST catalog")
+    print(f"   Incremental load added 10 more rows")
+    print(f"   Total: 35 rows in Iceberg table")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ def test_class_based_atomic_commits():
     warehouse_path = f"{temp_dir}/warehouse"
     catalog_path = f"{temp_dir}/catalog.db"
 
-    print(f"\n🏗️  Test environment:")
+    print(f"\nTest environment:")
     print(f"   Warehouse: {warehouse_path}")
     print(f"   Catalog: {catalog_path}")
 
@@ -48,7 +48,7 @@ def test_class_based_atomic_commits():
                 }
 
         # Create pipeline with class-based destination
-        print("\n📦 Creating pipeline with class-based destination...")
+        print("\nCreating pipeline with class-based destination...")
         pipeline = dlt.pipeline(
             pipeline_name="test_atomic",
             destination=iceberg_rest(
@@ -59,23 +59,23 @@ def test_class_based_atomic_commits():
             dataset_name="test_dataset",
         )
 
-        print("✅ Pipeline created")
+        print("Pipeline created")
 
         # Run pipeline - this should accumulate files and commit atomically
-        print("\n🚀 Running pipeline (should generate multiple files)...")
+        print("\nRunning pipeline (should generate multiple files)...")
         load_info = pipeline.run(generate_events())
 
         if load_info.has_failed_jobs:
-            print("❌ Pipeline failed!")
+            print("Pipeline failed")
             for job in load_info.load_packages[0].jobs["failed_jobs"]:
                 print(f"   Failed: {job.file_path}")
                 print(f"   Error: {job.exception()}")
             pytest.fail("Pipeline run failed")
 
-        print("✅ Pipeline completed successfully")
+        print("Pipeline completed successfully")
 
         # Verify data was loaded
-        print("\n🔍 Verifying atomic commit...")
+        print("\nVerifying atomic commit...")
         from pyiceberg.catalog import load_catalog
 
         catalog = load_catalog(
@@ -104,9 +104,9 @@ def test_class_based_atomic_commits():
         # Verify data count
         assert len(events_data) == 100, f"Expected 100 rows, got {len(events_data)}"
 
-        print("\n✅ SUCCESS! Class-based destination commits atomically!")
-        print(f"   ✅ 1 snapshot (not {len(snapshots)} separate commits)")
-        print(f"   ✅ 100 rows loaded correctly")
+        print("\nClass-based destination commits atomically")
+        print(f"   1 snapshot (not {len(snapshots)} separate commits)")
+        print(f"   100 rows loaded correctly")
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -122,7 +122,7 @@ def test_class_based_multiple_tables():
     warehouse_path = f"{temp_dir}/warehouse"
     catalog_path = f"{temp_dir}/catalog.db"
 
-    print(f"\n🏗️  Test environment (multi-table):")
+    print(f"\nTest environment (multi-table):")
     print(f"   Warehouse: {warehouse_path}")
 
     try:
@@ -148,7 +148,7 @@ def test_class_based_multiple_tables():
                     "created_at": base_time + timedelta(days=i),
                 }
 
-        print("\n📦 Creating pipeline...")
+        print("\nCreating pipeline...")
         pipeline = dlt.pipeline(
             pipeline_name="test_multi_table",
             destination=iceberg_rest(
@@ -159,15 +159,15 @@ def test_class_based_multiple_tables():
             dataset_name="test_dataset",
         )
 
-        print("🚀 Running pipeline with 2 tables...")
+        print("Running pipeline with 2 tables...")
         load_info = pipeline.run([generate_events(), generate_users()])
 
         assert not load_info.has_failed_jobs, "Pipeline failed"
 
-        print("✅ Pipeline completed")
+        print("Pipeline completed")
 
         # Verify each table has exactly 1 snapshot
-        print("\n🔍 Verifying atomic commits per table...")
+        print("\nVerifying atomic commits per table...")
         from pyiceberg.catalog import load_catalog
 
         catalog = load_catalog(
@@ -200,9 +200,9 @@ def test_class_based_multiple_tables():
         assert len(events_data) == 50
         assert len(users_data) == 30
 
-        print("\n✅ SUCCESS! Multiple tables committed atomically!")
-        print(f"   ✅ Events: 1 snapshot, 50 rows")
-        print(f"   ✅ Users: 1 snapshot, 30 rows")
+        print("\nMultiple tables committed atomically")
+        print(f"   Events: 1 snapshot, 50 rows")
+        print(f"   Users: 1 snapshot, 30 rows")
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -220,7 +220,7 @@ def test_class_based_incremental():
     warehouse_path = f"{temp_dir}/warehouse"
     catalog_path = f"{temp_dir}/catalog.db"
 
-    print(f"\n🏗️  Test environment (incremental):")
+    print(f"\nTest environment (incremental):")
 
     try:
         from dlt_iceberg import iceberg_rest
@@ -247,18 +247,18 @@ def test_class_based_incremental():
             dataset_name="test_dataset",
         )
 
-        print("\n🚀 Run 1: Loading batch 1 (50 rows)...")
+        print("\nRun 1: Loading batch 1 (50 rows)...")
         load_info1 = pipeline.run(generate_batch_1())
         assert not load_info1.has_failed_jobs
 
-        print("🚀 Run 2: Loading batch 2 (30 rows)...")
+        print("Run 2: Loading batch 2 (30 rows)...")
         load_info2 = pipeline.run(generate_batch_2())
         assert not load_info2.has_failed_jobs
 
-        print("✅ Both runs completed")
+        print("Both runs completed")
 
         # Verify snapshots
-        print("\n🔍 Verifying incremental snapshots...")
+        print("\nVerifying incremental snapshots...")
         from pyiceberg.catalog import load_catalog
 
         catalog = load_catalog(
@@ -282,9 +282,9 @@ def test_class_based_incremental():
             f"Expected 80 rows total, got {len(events_data)}"
         )
 
-        print("\n✅ SUCCESS! Incremental loads work correctly!")
-        print(f"   ✅ 2 snapshots (1 per pipeline run)")
-        print(f"   ✅ 80 rows total")
+        print("\nIncremental loads work correctly")
+        print(f"   2 snapshots (1 per pipeline run)")
+        print(f"   80 rows total")
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

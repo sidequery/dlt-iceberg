@@ -179,12 +179,12 @@ def test_merge_upsert():
         assert user4["username"] == "diana"
         assert user4["score"] == 400
 
-        print(f"\nSUCCESS! Merge disposition works correctly!")
+        print(f"\nMerge disposition works correctly")
         print(f"   - User 1 unchanged (not in merge)")
         print(f"   - User 2 updated (score 200 -> 250)")
         print(f"   - User 3 updated (score 300 -> 350)")
         print(f"   - User 4 inserted (new)")
-        print(f"   - No duplicates!")
+        print(f"   - No duplicates")
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -244,7 +244,7 @@ def test_merge_without_primary_key_falls_back_to_append():
         # Should have 4 rows (appended, not merged)
         assert len(result) == 4
 
-        print(f"\nSUCCESS! Merge without primary_key correctly falls back to append")
+        print(f"\nMerge without primary_key correctly falls back to append")
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

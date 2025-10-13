@@ -130,7 +130,7 @@ def test_schema_evolution_add_column():
         # New rows should have values for new_field
         assert not new_rows["new_field"].isna().any(), "New rows should have values for new_field"
 
-        print("\n   SUCCESS: Column added and all data readable!")
+        print("\n   Column added and all data readable")
         print(f"   - Old rows (1-10): new_field is null")
         print(f"   - New rows (11-20): new_field has values")
 
@@ -237,7 +237,7 @@ def test_schema_evolution_type_promotion():
         assert df["metric_value"].min() == 1.5
         assert df["metric_value"].max() == 6.5
 
-        print("\n   SUCCESS: Types promoted and all data readable!")
+        print("\n   Types promoted and all data readable")
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -286,7 +286,7 @@ def test_schema_evolution_unsafe_changes():
         assert False, "Should have raised SchemaEvolutionError for dropped column"
     except SchemaEvolutionError as e:
         assert "value" in str(e).lower() or "dropped" in str(e).lower()
-        print(f"   CORRECTLY REJECTED: {str(e)}")
+        print(f"   Correctly rejected: {str(e)}")
 
     # Test 2: Unsafe type narrowing should be detected
     print("\nTest 2: Unsafe type narrowing detection")
@@ -311,9 +311,9 @@ def test_schema_evolution_unsafe_changes():
         assert False, "Should have raised SchemaEvolutionError for type narrowing"
     except SchemaEvolutionError as e:
         assert "id" in str(e).lower() or "unsafe" in str(e).lower()
-        print(f"   CORRECTLY REJECTED: {str(e)}")
+        print(f"   Correctly rejected: {str(e)}")
 
-    print("\n   SUCCESS: Unsafe schema changes detected and prevented!")
+    print("\n   Unsafe schema changes detected and prevented")
 
 
 def test_schema_evolution_unit_compare():
@@ -329,23 +329,23 @@ def test_schema_evolution_unit_compare():
 
     # Safe promotions
     assert can_promote_type(IntegerType(), LongType()), "int -> long should be safe"
-    print("   int -> long: SAFE")
+    print("   int -> long: safe")
 
     assert can_promote_type(FloatType(), DoubleType()), "float -> double should be safe"
-    print("   float -> double: SAFE")
+    print("   float -> double: safe")
 
     assert can_promote_type(IntegerType(), IntegerType()), "same type should be safe"
-    print("   int -> int: SAFE")
+    print("   int -> int: safe")
 
     # Unsafe promotions
     assert not can_promote_type(LongType(), IntegerType()), "long -> int should be unsafe"
-    print("   long -> int: UNSAFE (correctly rejected)")
+    print("   long -> int: unsafe (correctly rejected)")
 
     assert not can_promote_type(DoubleType(), FloatType()), "double -> float should be unsafe"
-    print("   double -> float: UNSAFE (correctly rejected)")
+    print("   double -> float: unsafe (correctly rejected)")
 
     assert not can_promote_type(IntegerType(), StringType()), "int -> string should be unsafe"
-    print("   int -> string: UNSAFE (correctly rejected)")
+    print("   int -> string: unsafe (correctly rejected)")
 
     # Test schema comparison
     print("\nTesting schema comparison:")
@@ -374,7 +374,7 @@ def test_schema_evolution_unit_compare():
     assert len(dropped) == 0, "Should detect 0 dropped columns"
     print(f"   Dropped columns: {dropped}")
 
-    print("\n   SUCCESS: All unit tests passed!")
+    print("\n   All unit tests passed")
 
 
 if __name__ == "__main__":
