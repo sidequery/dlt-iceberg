@@ -7,6 +7,7 @@ hooks, enabling atomic commits of multiple files per table.
 
 import logging
 import time
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Iterable, Tuple, Type
@@ -15,7 +16,7 @@ from types import TracebackType
 import pyarrow as pa
 import pyarrow.parquet as pq
 from dlt.common.configuration import configspec
-from dlt.common.destination import DestinationCapabilitiesContext
+from dlt.common.destination import DestinationCapabilitiesContext, Destination
 from dlt.common.destination.client import (
     JobClientBase,
     LoadJob,
@@ -42,6 +43,13 @@ from .error_handling import (
 from pyiceberg.io.pyarrow import schema_to_pyarrow
 
 logger = logging.getLogger(__name__)
+
+
+# MODULE-LEVEL STATE: Accumulate files across client instances
+# Key: load_id, Value: {table_name: [(table_schema, file_path, arrow_table), ...]}
+# This works because dlt creates multiple client instances but they're all in the same process
+_PENDING_FILES: Dict[str, Dict[str, List[Tuple[TTableSchema, str, pa.Table]]]] = {}
+_PENDING_FILES_LOCK = threading.Lock()
 
 
 @configspec
@@ -111,7 +119,7 @@ class IcebergRestLoadJob(RunnableLoadJob):
             # Get table info from load context
             table_name = self._load_table["name"]
 
-            # Register file for batch commit
+            # Register file for batch commit (using global state)
             self._client.register_pending_file(
                 load_id=self._load_id,
                 table_schema=self._load_table,
@@ -144,12 +152,6 @@ class IcebergRestClient(JobClientBase):
     ) -> None:
         super().__init__(schema, config, capabilities)
         self.config: IcebergRestConfiguration = config
-
-        # Accumulate pending files per load_id and table
-        # Structure: {load_id: {table_name: [(table_schema, file_path, arrow_table), ...]}}
-        self._pending_files: Dict[str, Dict[str, List[Tuple[TTableSchema, str, pa.Table]]]] = defaultdict(
-            lambda: defaultdict(list)
-        )
 
         # Catalog instance (created lazily)
         self._catalog = None
@@ -281,39 +283,49 @@ class IcebergRestClient(JobClientBase):
         """
         Register a file for batch commit in complete_load().
 
-        Called by IcebergRestLoadJob during file processing.
+        Uses module-level global state since dlt creates multiple client instances.
         """
-        self._pending_files[load_id][table_name].append(
-            (table_schema, file_path, arrow_table)
-        )
-        logger.debug(
-            f"Registered file for {table_name} in load {load_id}: "
-            f"{len(self._pending_files[load_id][table_name])} files pending"
-        )
+        with _PENDING_FILES_LOCK:
+            if load_id not in _PENDING_FILES:
+                _PENDING_FILES[load_id] = defaultdict(list)
+
+            _PENDING_FILES[load_id][table_name].append(
+                (table_schema, file_path, arrow_table)
+            )
+
+            file_count = len(_PENDING_FILES[load_id][table_name])
+            logger.info(
+                f"Registered file for {table_name} in load {load_id}: "
+                f"{file_count} files pending"
+            )
 
     def complete_load(self, load_id: str) -> None:
         """
         ATOMIC COMMIT: Process all accumulated files in a single transaction per table.
 
         Called once by dlt after all individual file jobs complete successfully.
+        Reads from module-level global state since dlt creates multiple client instances.
         """
-        if load_id not in self._pending_files:
-            logger.info(f"No files to commit for load {load_id}")
-            return
+        with _PENDING_FILES_LOCK:
+            if load_id not in _PENDING_FILES or not _PENDING_FILES[load_id]:
+                logger.info(f"No files to commit for load {load_id}")
+                return
+
+            # Copy data and clear immediately (under lock)
+            pending_files = dict(_PENDING_FILES[load_id])
+            del _PENDING_FILES[load_id]
 
         catalog = self._get_catalog()
         namespace = self.config.namespace
 
-        total_files = sum(
-            len(files) for files in self._pending_files[load_id].values()
-        )
+        total_files = sum(len(files) for files in pending_files.values())
         logger.info(
             f"Committing {total_files} files across "
-            f"{len(self._pending_files[load_id])} tables for load {load_id}"
+            f"{len(pending_files)} tables for load {load_id}"
         )
 
         # Process each table
-        for table_name, file_data in self._pending_files[load_id].items():
+        for table_name, file_data in pending_files.items():
             identifier = f"{namespace}.{table_name}"
 
             try:
@@ -330,8 +342,6 @@ class IcebergRestClient(JobClientBase):
                 )
                 raise
 
-        # Clean up after successful commit
-        del self._pending_files[load_id]
         logger.info(f"Load {load_id} completed successfully")
 
     def _commit_table_files(
@@ -530,130 +540,67 @@ class IcebergRestClient(JobClientBase):
             self._catalog = None
 
 
-def capabilities() -> DestinationCapabilitiesContext:
-    """Define capabilities for Iceberg REST destination."""
-    caps = DestinationCapabilitiesContext()
-
-    # File formats
-    caps.preferred_loader_file_format = "parquet"
-    caps.supported_loader_file_formats = ["parquet"]
-    caps.preferred_staging_file_format = None
-    caps.supported_staging_file_formats = []
-
-    # Merge strategies (we handle upsert ourselves)
-    caps.supported_merge_strategies = ["upsert"]
-
-    # Replace strategies
-    caps.supported_replace_strategies = ["truncate-and-insert", "insert-from-staging"]
-
-    # Identifiers
-    caps.escape_identifier = lambda x: f"`{x}`"
-    caps.escape_literal = lambda x: f"'{x}'"
-    caps.casefold_identifier = str.lower
-    caps.has_case_sensitive_identifiers = True
-
-    # Precision
-    caps.decimal_precision = (38, 9)
-    caps.wei_precision = (38, 0)
-    caps.timestamp_precision = 6
-
-    # Limits
-    caps.max_identifier_length = 255
-    caps.max_column_identifier_length = 255
-    caps.max_query_length = 1024 * 1024
-    caps.is_max_query_length_in_bytes = True
-    caps.max_text_data_type_length = 1024 * 1024 * 1024
-    caps.is_max_text_data_type_length_in_bytes = True
-
-    # Transactions (Iceberg handles its own)
-    caps.supports_ddl_transactions = False
-    caps.supports_transactions = False
-    caps.supports_multiple_statements = False
-
-    return caps
-
-
-def iceberg_rest_class_based(
-    catalog_uri: str = None,
-    warehouse: str = None,
-    namespace: str = "default",
-    credential: str = None,
-    oauth2_server_uri: str = None,
-    scope: str = "PRINCIPAL_ROLE:ALL",
-    token: str = None,
-    sigv4_enabled: bool = False,
-    signing_region: str = None,
-    signing_name: str = "execute-api",
-    s3_endpoint: str = None,
-    s3_access_key_id: str = None,
-    s3_secret_access_key: str = None,
-    s3_region: str = None,
-    max_retries: int = 5,
-    retry_backoff_base: float = 2.0,
-    strict_casting: bool = False,
-    **kwargs,
-):
+class iceberg_rest_class_based(Destination[IcebergRestConfiguration, "IcebergRestClient"]):
     """
-    Create Iceberg REST destination with atomic multi-file commits.
+    Iceberg REST destination with atomic multi-file commits.
 
     This uses the class-based destination API to provide full lifecycle hooks,
     enabling atomic commits of multiple files per table.
 
-    Args:
-        catalog_uri: REST catalog endpoint URL (e.g., http://localhost:19120/iceberg/v1/main)
-        warehouse: Warehouse location (S3/GCS/Azure path)
-        namespace: Iceberg namespace (database)
-        credential: OAuth2 credentials in format "client_id:client_secret"
-        oauth2_server_uri: OAuth2 token endpoint
-        scope: OAuth2 scope
-        token: Bearer token (alternative to OAuth2)
-        sigv4_enabled: Enable AWS SigV4 signing
-        signing_region: AWS region for SigV4
-        signing_name: AWS service name for SigV4
-        s3_endpoint: S3 endpoint URL (for MinIO or other S3-compatible storage)
-        s3_access_key_id: S3 access key
-        s3_secret_access_key: S3 secret key
-        s3_region: S3 region
-        max_retries: Maximum retry attempts for commit failures
-        retry_backoff_base: Base for exponential backoff
-        strict_casting: If True, fail when schema cast would lose data
-
-    Returns:
-        Destination instance
+    Usage:
+        pipeline = dlt.pipeline(
+            destination=iceberg_rest(
+                catalog_uri="http://localhost:19120/iceberg/v1/main",
+                warehouse="s3://bucket/warehouse",
+                namespace="default",
+            )
+        )
     """
-    from dlt.common.destination import Destination
 
-    def _make_client(
-        schema: Schema,
-        config: IcebergRestConfiguration,
-        caps: DestinationCapabilitiesContext,
-    ) -> IcebergRestClient:
-        return IcebergRestClient(schema, config, caps)
+    spec = IcebergRestConfiguration
 
-    return Destination(
-        destination_type="iceberg_rest",
-        destination_description="Apache Iceberg with REST catalog (atomic commits)",
-        config_params=dict(
-            catalog_uri=catalog_uri,
-            warehouse=warehouse,
-            namespace=namespace,
-            credential=credential,
-            oauth2_server_uri=oauth2_server_uri,
-            scope=scope,
-            token=token,
-            sigv4_enabled=sigv4_enabled,
-            signing_region=signing_region,
-            signing_name=signing_name,
-            s3_endpoint=s3_endpoint,
-            s3_access_key_id=s3_access_key_id,
-            s3_secret_access_key=s3_secret_access_key,
-            s3_region=s3_region,
-            max_retries=max_retries,
-            retry_backoff_base=retry_backoff_base,
-            strict_casting=strict_casting,
-            **kwargs,
-        ),
-        spec=IcebergRestConfiguration,
-        capabilities=capabilities(),
-        client_class=_make_client,
-    )
+    def _raw_capabilities(self) -> DestinationCapabilitiesContext:
+        """Define capabilities for Iceberg REST destination."""
+        caps = DestinationCapabilitiesContext()
+
+        # File formats
+        caps.preferred_loader_file_format = "parquet"
+        caps.supported_loader_file_formats = ["parquet"]
+        caps.preferred_staging_file_format = None
+        caps.supported_staging_file_formats = []
+
+        # Merge strategies (we handle upsert ourselves)
+        caps.supported_merge_strategies = ["upsert"]
+
+        # Replace strategies
+        caps.supported_replace_strategies = ["truncate-and-insert", "insert-from-staging"]
+
+        # Identifiers
+        caps.escape_identifier = lambda x: f"`{x}`"
+        caps.escape_literal = lambda x: f"'{x}'"
+        caps.casefold_identifier = str.lower
+        caps.has_case_sensitive_identifiers = True
+
+        # Precision
+        caps.decimal_precision = (38, 9)
+        caps.wei_precision = (38, 0)
+        caps.timestamp_precision = 6
+
+        # Limits
+        caps.max_identifier_length = 255
+        caps.max_column_identifier_length = 255
+        caps.max_query_length = 1024 * 1024
+        caps.is_max_query_length_in_bytes = True
+        caps.max_text_data_type_length = 1024 * 1024 * 1024
+        caps.is_max_text_data_type_length_in_bytes = True
+
+        # Transactions (Iceberg handles its own)
+        caps.supports_ddl_transactions = False
+        caps.supports_transactions = False
+        caps.supports_multiple_statements = False
+
+        return caps
+
+    @property
+    def client_class(self) -> Type["IcebergRestClient"]:
+        return IcebergRestClient
