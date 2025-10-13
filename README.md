@@ -15,9 +15,13 @@ A [dlt](https://dlthub.com/) destination for [Apache Iceberg](https://iceberg.ap
 ## Installation
 
 ```bash
-git clone https://github.com/sidequery/dlt-iceberg.git
-cd dlt-iceberg
-uv sync
+pip install dlt-iceberg
+```
+
+Or with uv:
+
+```bash
+uv add dlt-iceberg
 ```
 
 ## Quick Start
@@ -63,7 +67,38 @@ def generate_users():
 pipeline.run(generate_users())
 ```
 
-## Configuration
+## Configuration Options
+
+All configuration options can be passed to `iceberg_rest()`:
+
+```python
+iceberg_rest(
+    catalog_uri="...",           # Required: REST catalog URI
+    namespace="...",             # Required: Iceberg namespace (database)
+    warehouse="...",             # Optional: Warehouse location
+
+    # Authentication
+    credential="...",            # OAuth2 client credentials
+    oauth2_server_uri="...",     # OAuth2 token endpoint
+    token="...",                 # Bearer token
+
+    # AWS SigV4
+    sigv4_enabled=True,
+    signing_region="us-east-1",
+
+    # S3 configuration
+    s3_endpoint="...",
+    s3_access_key_id="...",
+    s3_secret_access_key="...",
+    s3_region="...",
+
+    # Performance tuning
+    max_retries=5,               # Retry attempts for transient failures
+    retry_backoff_base=2.0,      # Exponential backoff multiplier
+    merge_batch_size=100000,     # Rows per batch for merge operations
+    strict_casting=False,        # Fail on potential data loss
+)
+```
 
 ### Nessie (Docker)
 
