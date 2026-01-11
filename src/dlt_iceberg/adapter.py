@@ -187,7 +187,7 @@ def _get_resource_for_adapter(data: Any):
 
 def iceberg_adapter(
     data: Any,
-    partition: Optional[Union[PartitionTransform, List[PartitionTransform]]] = None,
+    partition: Optional[Union[str, PartitionTransform, List[Union[str, PartitionTransform]]]] = None,
 ):
     """
     Apply Iceberg-specific hints to a dlt resource.
@@ -198,23 +198,29 @@ def iceberg_adapter(
     Args:
         data: A dlt resource, source (with single resource), or raw data
         partition: Partition specification(s). Can be:
+            - A column name string (uses identity transform)
             - A single PartitionTransform
-            - A list of PartitionTransform objects
+            - A list of column names and/or PartitionTransform objects
             Use iceberg_partition helpers to create transforms.
 
     Returns:
         DltResource with Iceberg-specific hints applied
 
     Examples:
+        # Simple identity partition by column name
+        iceberg_adapter(my_resource, partition="region")
+        iceberg_adapter(my_resource, partition=["region", "category"])
+
         # Single partition column with month transform
         iceberg_adapter(my_resource, partition=iceberg_partition.month("created_at"))
 
-        # Multiple partition columns
+        # Multiple partition columns with mixed specs
         iceberg_adapter(
             my_resource,
             partition=[
                 iceberg_partition.day("event_date"),
-                iceberg_partition.bucket("user_id", 10),
+                "region",  # identity partition
+                iceberg_partition.bucket(10, "user_id"),
             ]
         )
 
@@ -228,10 +234,21 @@ def iceberg_adapter(
         return resource
 
     # Normalize to list
-    partitions = [partition] if isinstance(partition, PartitionTransform) else partition
+    if isinstance(partition, (str, PartitionTransform)):
+        partition_list = [partition]
+    else:
+        partition_list = partition
 
-    if not partitions:
+    if not partition_list:
         return resource
+
+    # Convert strings to identity PartitionTransforms
+    partitions: List[PartitionTransform] = []
+    for p in partition_list:
+        if isinstance(p, str):
+            partitions.append(iceberg_partition.identity(p))
+        else:
+            partitions.append(p)
 
     # Build column hints for partitioning
     column_hints = {}

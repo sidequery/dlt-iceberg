@@ -83,6 +83,52 @@ class TestPartitionTransform:
 class TestIcebergAdapter:
     """Tests for iceberg_adapter function."""
 
+    def test_adapter_with_string_partition(self):
+        """Test adapter with string shorthand for identity partition."""
+        @dlt.resource(name="events")
+        def events():
+            yield {"id": 1, "region": "US"}
+
+        adapted = iceberg_adapter(events, partition="region")
+
+        hints = adapted._hints
+        columns = hints.get("columns", {})
+        assert "region" in columns
+        assert columns["region"].get("x-partition") is True
+        # Identity transform doesn't set x-partition-transform
+
+    def test_adapter_with_string_list_partition(self):
+        """Test adapter with list of string column names."""
+        @dlt.resource(name="events")
+        def events():
+            yield {"id": 1, "region": "US", "category": "A"}
+
+        adapted = iceberg_adapter(events, partition=["region", "category"])
+
+        columns = adapted._hints.get("columns", {})
+        assert columns["region"]["x-partition"] is True
+        assert columns["category"]["x-partition"] is True
+
+    def test_adapter_with_mixed_partition_specs(self):
+        """Test adapter with mix of strings and PartitionTransforms."""
+        @dlt.resource(name="events")
+        def events():
+            yield {"id": 1, "region": "US", "created_at": "2024-01-01"}
+
+        adapted = iceberg_adapter(
+            events,
+            partition=[
+                "region",  # string shorthand
+                iceberg_partition.month("created_at"),  # explicit transform
+            ]
+        )
+
+        columns = adapted._hints.get("columns", {})
+        assert columns["region"]["x-partition"] is True
+        assert "x-partition-transform" not in columns["region"]  # identity
+        assert columns["created_at"]["x-partition"] is True
+        assert columns["created_at"]["x-partition-transform"] == "month"
+
     def test_adapter_with_dlt_resource(self):
         @dlt.resource(name="events")
         def events():
