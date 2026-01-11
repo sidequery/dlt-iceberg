@@ -184,6 +184,40 @@ services:
         echo ''
         echo 'Lakekeeper setup complete!'
 
+  # Unity Catalog server
+  unity-catalog:
+    image: unitycatalog/unitycatalog:latest
+    container_name: unity-catalog
+    ports:
+      - "8083:8080"
+    volumes:
+      - unity-catalog-data:/opt/unitycatalog/etc/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/2.1/unity-catalog/catalogs"]
+      interval: 10s
+      timeout: 30s
+      retries: 30
+      start_period: 60s
+
+  # Unity Catalog setup - create schema in default 'unity' catalog
+  unity-catalog-setup:
+    image: curlimages/curl:latest
+    container_name: unity-catalog-setup
+    depends_on:
+      unity-catalog:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo 'Creating Unity Catalog schema...'
+        curl -s -X POST http://unity-catalog:8080/api/2.1/unity-catalog/schemas \
+          -H 'Content-Type: application/json' \
+          -d '{"name": "dlt_test", "catalog_name": "unity", "comment": "Schema for dlt-iceberg tests"}'
+        echo ''
+        echo 'Unity Catalog setup complete!'
+
 volumes:
   minio-data:
   lakekeeper-data:
+  unity-catalog-data:
