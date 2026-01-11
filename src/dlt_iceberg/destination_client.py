@@ -22,7 +22,10 @@ from dlt.common.destination.client import (
     LoadJob,
     RunnableLoadJob,
     DestinationClientConfiguration,
+    SupportsOpenTables,
 )
+from dlt.common.schema.typing import TTableFormat
+from dlt.destinations.sql_client import WithSqlClient, SqlClientBase
 from dlt.common.schema import Schema, TTableSchema
 from dlt.common.schema.typing import TTableSchema as PreparedTableSchema
 from pyiceberg.catalog import load_catalog
@@ -156,11 +159,12 @@ class IcebergRestLoadJob(RunnableLoadJob):
             raise
 
 
-class IcebergRestClient(JobClientBase):
+class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables):
     """
     Class-based Iceberg REST destination with atomic multi-file commits.
 
     Accumulates files during load and commits them atomically in complete_load().
+    Implements WithSqlClient and SupportsOpenTables for pipeline.dataset() support.
     """
 
     def __init__(
@@ -174,6 +178,77 @@ class IcebergRestClient(JobClientBase):
 
         # Catalog instance (created lazily)
         self._catalog = None
+        # SQL client instance (created lazily)
+        self._sql_client = None
+
+    # ---- WithSqlClient interface ----
+
+    @property
+    def sql_client(self) -> SqlClientBase:
+        """Get or create the DuckDB SQL client for dataset access."""
+        if self._sql_client is None:
+            from .sql_client import IcebergSqlClient
+            self._sql_client = IcebergSqlClient(
+                remote_client=self,
+                dataset_name=self.config.namespace,
+            )
+        return self._sql_client
+
+    @property
+    def sql_client_class(self) -> Type[SqlClientBase]:
+        """Return the SQL client class."""
+        from .sql_client import IcebergSqlClient
+        return IcebergSqlClient
+
+    # ---- SupportsOpenTables interface ----
+
+    def get_open_table_catalog(self, table_format: TTableFormat, catalog_name: str = None) -> Any:
+        """Get the PyIceberg catalog for accessing table metadata."""
+        if table_format != "iceberg":
+            raise ValueError(f"Unsupported table format: {table_format}")
+        return self._get_catalog()
+
+    def get_open_table_location(self, table_format: TTableFormat, table_name: str) -> str:
+        """Get the storage location for an Iceberg table."""
+        if table_format != "iceberg":
+            raise ValueError(f"Unsupported table format: {table_format}")
+
+        # Try to get location from catalog
+        try:
+            catalog = self._get_catalog()
+            identifier = f"{self.config.namespace}.{table_name}"
+            iceberg_table = catalog.load_table(identifier)
+            return iceberg_table.location()
+        except NoSuchTableError:
+            # Table doesn't exist yet, compute expected location
+            location = self._get_table_location(table_name)
+            if location:
+                return location
+            # Fallback to default warehouse location
+            warehouse = self.config.warehouse or ""
+            if warehouse and not warehouse.endswith("/"):
+                warehouse += "/"
+            return f"{warehouse}{self.config.namespace}/{table_name}"
+
+    def load_open_table(self, table_format: TTableFormat, table_name: str, **kwargs: Any) -> Any:
+        """Load and return a PyIceberg Table object."""
+        if table_format != "iceberg":
+            raise ValueError(f"Unsupported table format: {table_format}")
+
+        from dlt.common.destination.exceptions import DestinationUndefinedEntity
+
+        catalog = self._get_catalog()
+        identifier = f"{self.config.namespace}.{table_name}"
+
+        try:
+            return catalog.load_table(identifier)
+        except NoSuchTableError as e:
+            raise DestinationUndefinedEntity(table_name) from e
+
+    def is_open_table(self, table_format: TTableFormat, table_name: str) -> bool:
+        """Check if a table uses the specified open table format."""
+        # All tables in this destination are Iceberg tables
+        return table_format == "iceberg"
 
     def _get_catalog(self):
         """Get or create catalog connection."""
