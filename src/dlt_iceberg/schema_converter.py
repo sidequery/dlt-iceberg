@@ -18,6 +18,7 @@ from pyiceberg.types import (
     StringType,
     BinaryType,
     TimestampType,
+    TimestamptzType,
     DateType,
     TimeType,
     ListType,
@@ -125,6 +126,8 @@ def convert_arrow_to_iceberg_type(arrow_type: pa.DataType):
 
     # Temporal types
     elif pa.types.is_timestamp(arrow_type):
+        if arrow_type.tz is not None:
+            return TimestamptzType()
         return TimestampType()
     elif pa.types.is_date(arrow_type):
         return DateType()
@@ -197,7 +200,7 @@ def convert_dlt_type_to_iceberg_type(dlt_type: str):
         "bool": BooleanType(),
         "boolean": BooleanType(),
         "timestamp": TimestampType(),
-        "timestamptz": TimestampType(),
+        "timestamptz": TimestamptzType(),
         "date": DateType(),
         "time": TimeType(),
         "binary": BinaryType(),
