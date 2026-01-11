@@ -9,6 +9,7 @@ from pyiceberg.types import (
     StringType,
     LongType,
     TimestampType,
+    TimestamptzType,
     IntegerType,
     DecimalType,
     DoubleType,
@@ -152,6 +153,27 @@ def test_choose_partition_transform_timestamp():
     # Explicit day transform
     transform = choose_partition_transform(
         TimestampType(), "ts", {"partition_transform": "day"}
+    )
+    assert isinstance(transform, DayTransform)
+
+
+def test_choose_partition_transform_timestamptz():
+    """Test choosing transform for timestamptz fields."""
+    from pyiceberg.transforms import HourTransform
+
+    # Default (no hint)
+    transform = choose_partition_transform(TimestamptzType(), "ts", {})
+    assert isinstance(transform, MonthTransform)
+
+    # Explicit hour transform
+    transform = choose_partition_transform(
+        TimestamptzType(), "ts", {"partition_transform": "hour"}
+    )
+    assert isinstance(transform, HourTransform)
+
+    # Explicit day transform
+    transform = choose_partition_transform(
+        TimestamptzType(), "ts", {"partition_transform": "day"}
     )
     assert isinstance(transform, DayTransform)
 

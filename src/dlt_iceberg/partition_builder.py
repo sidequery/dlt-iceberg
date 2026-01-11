@@ -35,6 +35,7 @@ from pyiceberg.transforms import (
 )
 from pyiceberg.types import (
     TimestampType,
+    TimestamptzType,
     DateType,
     StringType,
     IntegerType,
@@ -92,14 +93,14 @@ def validate_transform_for_type(
     Raises:
         ValueError: If transform is invalid for the field type
     """
-    # Temporal transforms only for timestamp/date
+    # Temporal transforms only for timestamp/timestamptz/date
     temporal_transforms = {"year", "month", "day", "hour"}
     if transform_type in temporal_transforms:
-        if not isinstance(field_type, (TimestampType, DateType)):
+        if not isinstance(field_type, (TimestampType, TimestamptzType, DateType)):
             raise ValueError(
                 f"Temporal transform '{transform_type}' cannot be applied to "
                 f"column '{col_name}' with type {field_type}. "
-                f"Use timestamp or date types for temporal transforms."
+                f"Use timestamp, timestamptz, or date types for temporal transforms."
             )
 
     # Bucket transform validation
@@ -266,7 +267,7 @@ def choose_partition_transform(field_type, col_name: str, col_hints: dict):
             )
 
     # No hint specified - use defaults based on type
-    if isinstance(field_type, (TimestampType, DateType)):
+    if isinstance(field_type, (TimestampType, TimestamptzType, DateType)):
         # Default to month for timestamps/dates
         return MonthTransform()
     elif isinstance(field_type, (StringType, IntegerType, LongType)):
