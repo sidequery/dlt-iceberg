@@ -36,11 +36,13 @@ class PartitionTransform:
         column: Column name to partition on
         transform: Transform type (identity, year, month, day, hour, bucket, truncate)
         param: Optional parameter for bucket[N] or truncate[N]
+        name: Optional custom name for the partition field
     """
 
     column: str
     transform: str
     param: Optional[int] = None
+    name: Optional[str] = None
 
     def to_hint_value(self) -> str:
         """Convert to partition_transform hint value."""
@@ -54,74 +56,103 @@ class iceberg_partition:
 
     Provides static methods to create partition specifications:
 
-    - identity(column): No transformation, use value as-is
-    - year(column): Extract year from timestamp/date
-    - month(column): Extract year-month from timestamp/date
-    - day(column): Extract date from timestamp/date
-    - hour(column): Extract date-hour from timestamp
-    - bucket(column, n): Hash partition into n buckets
-    - truncate(column, width): Truncate string/number to width
+    - identity(column, name=None): No transformation, use value as-is
+    - year(column, name=None): Extract year from timestamp/date
+    - month(column, name=None): Extract year-month from timestamp/date
+    - day(column, name=None): Extract date from timestamp/date
+    - hour(column, name=None): Extract date-hour from timestamp
+    - bucket(num_buckets, column, name=None): Hash partition into n buckets
+    - truncate(width, column, name=None): Truncate string/number to width
 
     Examples:
         iceberg_partition.month("created_at")
-        iceberg_partition.bucket("user_id", 10)
-        iceberg_partition.truncate("email", 4)
+        iceberg_partition.month("created_at", "month_created")
+        iceberg_partition.bucket(10, "user_id")
+        iceberg_partition.bucket(10, "user_id", "user_bucket")
+        iceberg_partition.truncate(4, "email")
     """
 
     @staticmethod
-    def identity(column: str) -> PartitionTransform:
-        """Identity transform - use column value as-is for partitioning."""
-        return PartitionTransform(column=column, transform="identity")
-
-    @staticmethod
-    def year(column: str) -> PartitionTransform:
-        """Year transform - partition by year extracted from timestamp/date."""
-        return PartitionTransform(column=column, transform="year")
-
-    @staticmethod
-    def month(column: str) -> PartitionTransform:
-        """Month transform - partition by year-month extracted from timestamp/date."""
-        return PartitionTransform(column=column, transform="month")
-
-    @staticmethod
-    def day(column: str) -> PartitionTransform:
-        """Day transform - partition by date extracted from timestamp/date."""
-        return PartitionTransform(column=column, transform="day")
-
-    @staticmethod
-    def hour(column: str) -> PartitionTransform:
-        """Hour transform - partition by date-hour extracted from timestamp."""
-        return PartitionTransform(column=column, transform="hour")
-
-    @staticmethod
-    def bucket(column: str, num_buckets: int) -> PartitionTransform:
-        """Bucket transform - hash partition into n buckets.
+    def identity(column: str, name: Optional[str] = None) -> PartitionTransform:
+        """Identity transform - use column value as-is for partitioning.
 
         Args:
             column: Column name to partition on
+            name: Optional custom name for the partition field
+        """
+        return PartitionTransform(column=column, transform="identity", name=name)
+
+    @staticmethod
+    def year(column: str, name: Optional[str] = None) -> PartitionTransform:
+        """Year transform - partition by year extracted from timestamp/date.
+
+        Args:
+            column: Column name to partition on
+            name: Optional custom name for the partition field
+        """
+        return PartitionTransform(column=column, transform="year", name=name)
+
+    @staticmethod
+    def month(column: str, name: Optional[str] = None) -> PartitionTransform:
+        """Month transform - partition by year-month extracted from timestamp/date.
+
+        Args:
+            column: Column name to partition on
+            name: Optional custom name for the partition field
+        """
+        return PartitionTransform(column=column, transform="month", name=name)
+
+    @staticmethod
+    def day(column: str, name: Optional[str] = None) -> PartitionTransform:
+        """Day transform - partition by date extracted from timestamp/date.
+
+        Args:
+            column: Column name to partition on
+            name: Optional custom name for the partition field
+        """
+        return PartitionTransform(column=column, transform="day", name=name)
+
+    @staticmethod
+    def hour(column: str, name: Optional[str] = None) -> PartitionTransform:
+        """Hour transform - partition by date-hour extracted from timestamp.
+
+        Args:
+            column: Column name to partition on
+            name: Optional custom name for the partition field
+        """
+        return PartitionTransform(column=column, transform="hour", name=name)
+
+    @staticmethod
+    def bucket(num_buckets: int, column: str, name: Optional[str] = None) -> PartitionTransform:
+        """Bucket transform - hash partition into n buckets.
+
+        Args:
             num_buckets: Number of buckets (must be positive)
+            column: Column name to partition on
+            name: Optional custom name for the partition field
 
         Raises:
             ValueError: If num_buckets is not positive
         """
         if num_buckets <= 0:
             raise ValueError(f"num_buckets must be positive, got {num_buckets}")
-        return PartitionTransform(column=column, transform="bucket", param=num_buckets)
+        return PartitionTransform(column=column, transform="bucket", param=num_buckets, name=name)
 
     @staticmethod
-    def truncate(column: str, width: int) -> PartitionTransform:
+    def truncate(width: int, column: str, name: Optional[str] = None) -> PartitionTransform:
         """Truncate transform - truncate string/number to width.
 
         Args:
-            column: Column name to partition on
             width: Truncation width (must be positive)
+            column: Column name to partition on
+            name: Optional custom name for the partition field
 
         Raises:
             ValueError: If width is not positive
         """
         if width <= 0:
             raise ValueError(f"width must be positive, got {width}")
-        return PartitionTransform(column=column, transform="truncate", param=width)
+        return PartitionTransform(column=column, transform="truncate", param=width, name=name)
 
 
 def _get_resource_for_adapter(data: Any):
@@ -156,7 +187,7 @@ def _get_resource_for_adapter(data: Any):
 
 def iceberg_adapter(
     data: Any,
-    partition: Optional[Union[PartitionTransform, List[PartitionTransform]]] = None,
+    partition: Optional[Union[str, PartitionTransform, List[Union[str, PartitionTransform]]]] = None,
 ):
     """
     Apply Iceberg-specific hints to a dlt resource.
@@ -167,23 +198,29 @@ def iceberg_adapter(
     Args:
         data: A dlt resource, source (with single resource), or raw data
         partition: Partition specification(s). Can be:
+            - A column name string (uses identity transform)
             - A single PartitionTransform
-            - A list of PartitionTransform objects
+            - A list of column names and/or PartitionTransform objects
             Use iceberg_partition helpers to create transforms.
 
     Returns:
         DltResource with Iceberg-specific hints applied
 
     Examples:
+        # Simple identity partition by column name
+        iceberg_adapter(my_resource, partition="region")
+        iceberg_adapter(my_resource, partition=["region", "category"])
+
         # Single partition column with month transform
         iceberg_adapter(my_resource, partition=iceberg_partition.month("created_at"))
 
-        # Multiple partition columns
+        # Multiple partition columns with mixed specs
         iceberg_adapter(
             my_resource,
             partition=[
                 iceberg_partition.day("event_date"),
-                iceberg_partition.bucket("user_id", 10),
+                "region",  # identity partition
+                iceberg_partition.bucket(10, "user_id"),
             ]
         )
 
@@ -197,10 +234,21 @@ def iceberg_adapter(
         return resource
 
     # Normalize to list
-    partitions = [partition] if isinstance(partition, PartitionTransform) else partition
+    if isinstance(partition, (str, PartitionTransform)):
+        partition_list = [partition]
+    else:
+        partition_list = partition
 
-    if not partitions:
+    if not partition_list:
         return resource
+
+    # Convert strings to identity PartitionTransforms
+    partitions: List[PartitionTransform] = []
+    for p in partition_list:
+        if isinstance(p, str):
+            partitions.append(iceberg_partition.identity(p))
+        else:
+            partitions.append(p)
 
     # Build column hints for partitioning
     column_hints = {}
@@ -215,6 +263,10 @@ def iceberg_adapter(
         # Set transform (identity is handled as default in partition_builder)
         if p.transform != "identity":
             column_hints[p.column]["x-partition-transform"] = p.to_hint_value()
+
+        # Set custom partition field name if provided
+        if p.name:
+            column_hints[p.column]["x-partition-name"] = p.name
 
     # Apply hints to resource
     resource.apply_hints(columns=column_hints)
