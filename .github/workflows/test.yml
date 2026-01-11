@@ -18,7 +18,7 @@ jobs:
 
       - name: Wait for setup containers
         run: |
-          for container in minio-setup lakekeeper-setup; do
+          for container in minio-setup lakekeeper-setup unity-catalog-setup; do
             echo "Waiting for $container..."
             exit_code=$(docker container wait $container)
             if [ "$exit_code" != "0" ]; then
