@@ -29,20 +29,27 @@ from pyiceberg.catalog import load_catalog
 
 
 def is_lakekeeper_available():
-    """Check if Lakekeeper REST catalog is accessible."""
+    """Check if Lakekeeper REST catalog is accessible with warehouse configured."""
     try:
         response = requests.get("http://localhost:8282/health", timeout=2)
-        return response.status_code == 200
+        if response.status_code != 200:
+            return False
+        response = requests.get("http://localhost:8282/management/v1/warehouse", timeout=2)
+        if response.status_code != 200:
+            return False
+        data = response.json()
+        warehouses = data.get("warehouses", [])
+        return any(w.get("name") == "test-warehouse" for w in warehouses)
     except Exception:
         return False
 
 
-def setup_host_docker_internal():
-    """Make 'host.docker.internal' resolvable to localhost.
+def _setup_host_docker_internal():
+    """Make 'host.docker.internal' resolvable to localhost on the host machine.
 
-    Lakekeeper's warehouse config uses 'host.docker.internal:9002' as the S3 endpoint.
-    This works from inside Docker containers, but from the host we need to resolve
-    it to 127.0.0.1. We do this by patching socket.getaddrinfo.
+    Lakekeeper vends 'host.docker.internal:9002' as the S3 endpoint. This works
+    inside Docker containers (via extra_hosts), but from the host we need to
+    resolve it to 127.0.0.1.
     """
     import socket
     _original_getaddrinfo = socket.getaddrinfo
@@ -55,16 +62,11 @@ def setup_host_docker_internal():
     socket.getaddrinfo = _patched_getaddrinfo
 
 
-# Patch DNS resolution when module loads
-setup_host_docker_internal()
+_setup_host_docker_internal()
 
 
 def get_lakekeeper_catalog(name: str = "lakekeeper"):
-    """Get a PyIceberg catalog connected to Lakekeeper.
-
-    Lakekeeper vends 'host.docker.internal:9002' as the S3 endpoint.
-    The setup_host_docker_internal() patch makes this resolve to localhost.
-    """
+    """Get a PyIceberg catalog connected to Lakekeeper."""
     return load_catalog(
         name,
         type="rest",
@@ -84,11 +86,7 @@ def cleanup_table(namespace: str, table_name: str):
 
 
 def get_lakekeeper_destination(namespace: str = "lk_test"):
-    """Get iceberg_rest destination configured for Lakekeeper.
-
-    Lakekeeper vends 'host.docker.internal:9002' as the S3 endpoint.
-    The setup_host_docker_internal() patch makes this resolve to localhost.
-    """
+    """Get iceberg_rest destination configured for Lakekeeper."""
     from dlt_iceberg import iceberg_rest
     return iceberg_rest(
         catalog_uri="http://localhost:8282/catalog/",

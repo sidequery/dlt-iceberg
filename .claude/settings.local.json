@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(docker compose:*)"
+      "Bash(docker compose:*)",
+      "WebSearch",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:dlthub.com)",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:github.com)"
     ],
     "deny": [],
     "ask": []
