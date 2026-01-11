@@ -6,11 +6,11 @@ A [dlt](https://dlthub.com/) destination for [Apache Iceberg](https://iceberg.ap
 
 - **Atomic Multi-File Commits**: Multiple parquet files committed as single Iceberg snapshot per table
 - **REST Catalog Support**: Works with Nessie, Polaris, AWS Glue, Unity Catalog
+- **Credential Vending**: Most REST catalogs vend storage credentials automatically
 - **Partitioning**: Full support for Iceberg partition transforms via `iceberg_adapter()`
 - **Merge Strategies**: Delete-insert and upsert with hard delete support
 - **DuckDB Integration**: Query loaded data via `pipeline.dataset()`
 - **Schema Evolution**: Automatic schema updates when adding columns
-- **Authentication**: OAuth2, Bearer token, AWS SigV4
 
 ## Installation
 
@@ -26,10 +26,6 @@ uv add dlt-iceberg
 
 ## Quick Start
 
-See [examples/](examples/) directory for working examples.
-
-### Incremental Load
-
 ```python
 import dlt
 from dlt_iceberg import iceberg_rest
@@ -41,12 +37,11 @@ def generate_events():
 pipeline = dlt.pipeline(
     pipeline_name="my_pipeline",
     destination=iceberg_rest(
-        catalog_uri="http://localhost:19120/iceberg/main",
+        catalog_uri="https://my-catalog.example.com/api/catalog",
         namespace="analytics",
-        s3_endpoint="http://localhost:9000",
-        s3_access_key_id="minioadmin",
-        s3_secret_access_key="minioadmin",
-        s3_region="us-east-1",
+        warehouse="my_warehouse",
+        credential="client-id:client-secret",
+        oauth2_server_uri="https://my-catalog.example.com/oauth/tokens",
     ),
 )
 
@@ -83,26 +78,38 @@ def generate_users():
 pipeline.run(generate_users())
 ```
 
-## Configuration Options
+## Configuration
 
-All configuration options can be passed to `iceberg_rest()`:
+### Required Options
 
 ```python
 iceberg_rest(
-    catalog_uri="...",           # Required: REST catalog URI
-    namespace="...",             # Required: Iceberg namespace (database)
-    warehouse="...",             # Optional: Warehouse location
+    catalog_uri="...",    # REST catalog endpoint (or sqlite:// for local)
+    namespace="...",      # Iceberg namespace (database)
+)
+```
 
-    # Authentication
-    credential="...",            # OAuth2 client credentials
-    oauth2_server_uri="...",     # OAuth2 token endpoint
-    token="...",                 # Bearer token
+### Authentication
 
-    # AWS SigV4
-    sigv4_enabled=True,
-    signing_region="us-east-1",
+Choose based on your catalog:
 
-    # S3 configuration
+| Catalog | Auth Method |
+|---------|-------------|
+| Polaris, Lakekeeper | `credential` + `oauth2_server_uri` |
+| Unity Catalog | `token` |
+| AWS Glue | `sigv4_enabled` + `signing_region` |
+| Local SQLite | None needed |
+
+Most REST catalogs (Polaris, Lakekeeper, etc.) **vend storage credentials automatically** via the catalog API. You typically don't need to configure S3/GCS/Azure credentials manually.
+
+<details>
+<summary><b>Advanced Options</b></summary>
+
+```python
+iceberg_rest(
+    # ... required options ...
+
+    # Manual storage credentials (usually not needed with credential vending)
     s3_endpoint="...",
     s3_access_key_id="...",
     s3_secret_access_key="...",
@@ -121,9 +128,75 @@ iceberg_rest(
 )
 ```
 
-### Catalog Examples
+</details>
 
-#### Nessie (Docker)
+## Catalog Examples
+
+<details>
+<summary><b>Polaris / Lakekeeper</b></summary>
+
+```python
+iceberg_rest(
+    catalog_uri="https://polaris.example.com/api/catalog",
+    warehouse="my_warehouse",
+    namespace="production",
+    credential="client-id:client-secret",
+    oauth2_server_uri="https://polaris.example.com/api/catalog/v1/oauth/tokens",
+)
+```
+
+Storage credentials are vended automatically by the catalog.
+
+</details>
+
+<details>
+<summary><b>Unity Catalog (Databricks)</b></summary>
+
+```python
+iceberg_rest(
+    catalog_uri="https://<workspace>.cloud.databricks.com/api/2.1/unity-catalog/iceberg-rest",
+    warehouse="<catalog-name>",
+    namespace="<schema-name>",
+    token="<databricks-token>",
+)
+```
+
+</details>
+
+<details>
+<summary><b>AWS Glue</b></summary>
+
+```python
+iceberg_rest(
+    catalog_uri="https://glue.us-east-1.amazonaws.com/iceberg",
+    warehouse="<account-id>:s3tablescatalog/<bucket>",
+    namespace="my_database",
+    sigv4_enabled=True,
+    signing_region="us-east-1",
+)
+```
+
+Requires AWS credentials in environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`).
+
+</details>
+
+<details>
+<summary><b>Local SQLite Catalog</b></summary>
+
+```python
+iceberg_rest(
+    catalog_uri="sqlite:///catalog.db",
+    warehouse="file:///path/to/warehouse",
+    namespace="my_namespace",
+)
+```
+
+Great for local development and testing.
+
+</details>
+
+<details>
+<summary><b>Nessie (Docker)</b></summary>
 
 ```python
 iceberg_rest(
@@ -136,54 +209,9 @@ iceberg_rest(
 )
 ```
 
-Start services: `docker compose up -d`
+Start Nessie + MinIO with `docker compose up -d` (see docker-compose.yml in repo).
 
-#### Local SQLite Catalog
-
-```python
-iceberg_rest(
-    catalog_uri="sqlite:///catalog.db",
-    warehouse="file:///path/to/warehouse",
-    namespace="my_namespace",
-)
-```
-
-#### AWS Glue
-
-```python
-iceberg_rest(
-    catalog_uri="https://glue.us-east-1.amazonaws.com/iceberg",
-    warehouse="<account-id>:s3tablescatalog/<bucket>",
-    namespace="my_database",
-    sigv4_enabled=True,
-    signing_region="us-east-1",
-)
-```
-
-AWS credentials via environment variables.
-
-#### Polaris
-
-```python
-iceberg_rest(
-    catalog_uri="https://polaris.example.com/api/catalog",
-    warehouse="s3://bucket/warehouse",
-    namespace="production",
-    credential="client-id:client-secret",
-    oauth2_server_uri="https://polaris.example.com/api/catalog/v1/oauth/tokens",
-)
-```
-
-#### Unity Catalog
-
-```python
-iceberg_rest(
-    catalog_uri="https://<workspace>.cloud.databricks.com/api/2.1/unity-catalog/iceberg-rest",
-    warehouse="<catalog-name>",
-    namespace="<schema-name>",
-    token="<databricks-token>",
-)
-```
+</details>
 
 ## Partitioning
 
@@ -315,7 +343,7 @@ def users_with_deletes():
 ### Run Tests
 
 ```bash
-# Start Docker services
+# Start Docker services (for Nessie tests)
 docker compose up -d
 
 # Run all tests
