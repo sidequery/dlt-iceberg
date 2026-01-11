@@ -4,7 +4,7 @@ services:
     image: minio/minio:latest
     container_name: minio-storage
     ports:
-      - "9000:9000"
+      - "9002:9000"
       - "9001:9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -45,7 +45,7 @@ services:
       # S3 config - endpoint is internal to docker network
       - nessie.catalog.service.s3.default-options.endpoint=http://minio:9000
       # external-endpoint is what clients outside docker should use
-      - nessie.catalog.service.s3.default-options.external-endpoint=http://localhost:9000
+      - nessie.catalog.service.s3.default-options.external-endpoint=http://localhost:9002
       - nessie.catalog.service.s3.default-options.path-style-access=true
       - nessie.catalog.service.s3.default-options.region=us-east-1
       # S3 credentials using secret reference
@@ -89,5 +89,96 @@ services:
       retries: 20
       start_period: 30s
 
+  # PostgreSQL for Lakekeeper
+  lakekeeper-db:
+    image: postgres:17
+    container_name: lakekeeper-db
+    environment:
+      POSTGRES_PASSWORD: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - lakekeeper-data:/var/lib/postgresql/data
+
+  # Lakekeeper migrations
+  lakekeeper-migrate:
+    image: quay.io/lakekeeper/catalog:latest
+    container_name: lakekeeper-migrate
+    environment: &lakekeeper-env
+      LAKEKEEPER__PG_ENCRYPTION_KEY: "ThisIsNotSecureButOkForTesting"
+      LAKEKEEPER__PG_DATABASE_URL_READ: "postgresql://postgres:postgres@lakekeeper-db:5432/postgres"
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: "postgresql://postgres:postgres@lakekeeper-db:5432/postgres"
+      LAKEKEEPER__AUTHZ_BACKEND: "allowall"
+    command: migrate
+    depends_on:
+      lakekeeper-db:
+        condition: service_healthy
+
+  # Lakekeeper catalog
+  lakekeeper:
+    image: quay.io/lakekeeper/catalog:latest
+    container_name: lakekeeper-catalog
+    ports:
+      - "8282:8181"
+    environment:
+      <<: *lakekeeper-env
+    command: serve
+    depends_on:
+      lakekeeper-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Lakekeeper warehouse setup
+  lakekeeper-setup:
+    image: curlimages/curl:latest
+    container_name: lakekeeper-setup
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo 'Bootstrapping Lakekeeper...'
+        curl -s -X POST http://lakekeeper:8181/management/v1/bootstrap \
+          -H 'Content-Type: application/json' \
+          -d '{"accept-terms-of-use": true}' || true
+        sleep 2
+        echo 'Creating warehouse...'
+        curl -s -X POST http://lakekeeper:8181/management/v1/warehouse \
+          -H 'Content-Type: application/json' \
+          -d '{
+            "warehouse-name": "test-warehouse",
+            "project-id": "00000000-0000-0000-0000-000000000000",
+            "storage-profile": {
+              "type": "s3",
+              "bucket": "warehouse",
+              "region": "us-east-1",
+              "path-style-access": true,
+              "endpoint": "http://host.docker.internal:9002",
+              "sts-enabled": false,
+              "flavor": "minio"
+            },
+            "storage-credential": {
+              "type": "s3",
+              "credential-type": "access-key",
+              "aws-access-key-id": "minioadmin",
+              "aws-secret-access-key": "minioadmin"
+            }
+          }'
+        echo ''
+        echo 'Lakekeeper setup complete!'
+
 volumes:
   minio-data:
+  lakekeeper-data:

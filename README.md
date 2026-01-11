@@ -133,7 +133,26 @@ iceberg_rest(
 ## Catalog Examples
 
 <details>
-<summary><b>Polaris / Lakekeeper</b></summary>
+<summary><b>Lakekeeper (Docker)</b></summary>
+
+```python
+iceberg_rest(
+    catalog_uri="http://localhost:8282/catalog/",
+    warehouse="test-warehouse",
+    namespace="my_namespace",
+    s3_endpoint="http://localhost:9000",
+    s3_access_key_id="minioadmin",
+    s3_secret_access_key="minioadmin",
+    s3_region="us-east-1",
+)
+```
+
+Start Lakekeeper + MinIO with `docker compose up -d`. Lakekeeper supports credential vending in production.
+
+</details>
+
+<details>
+<summary><b>Polaris</b></summary>
 
 ```python
 iceberg_rest(

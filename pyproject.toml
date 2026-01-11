@@ -29,7 +29,7 @@ dependencies = [
     "pydantic<2.11",
     "pyiceberg[pyiceberg-core]>=0.10.0",
     "requests>=2.32.5",
-    "s3fs>=0.4.2",
+    "s3fs>=2024.0.0",  # Modern async version required for credential vending compatibility
     "sqlalchemy>=2.0.44",
 ]
 
