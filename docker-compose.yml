@@ -21,6 +21,7 @@ services:
   # MinIO client to create bucket
   minio-setup:
     image: minio/mc:latest
+    container_name: minio-setup
     depends_on:
       minio:
         condition: service_healthy
