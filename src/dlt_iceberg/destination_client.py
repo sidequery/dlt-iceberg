@@ -351,6 +351,92 @@ class IcebergRestClient(JobClientBase):
 
         logger.info(f"Load {load_id} completed successfully")
 
+    def _get_merge_strategy(self, table_schema: TTableSchema) -> str:
+        """Extract merge strategy from table schema.
+
+        write_disposition can be:
+        - "merge" (string) -> use upsert (backward compatible)
+        - {"disposition": "merge", "strategy": "delete-insert"} -> explicit strategy
+
+        Returns:
+            Merge strategy: "upsert" or "delete-insert"
+        """
+        write_disposition = table_schema.get("write_disposition", "append")
+
+        if isinstance(write_disposition, dict):
+            return write_disposition.get("strategy", "delete-insert")
+
+        # String "merge" - use upsert as our default (backward compatible)
+        return "upsert"
+
+    def _execute_delete_insert(
+        self,
+        iceberg_table,
+        combined_table: pa.Table,
+        primary_keys: List[str],
+        identifier: str,
+    ) -> Tuple[int, int]:
+        """Execute delete-insert merge strategy.
+
+        Deletes rows matching primary keys in incoming data, then appends new data.
+        Uses PyIceberg transaction for atomic delete + append.
+
+        Args:
+            iceberg_table: PyIceberg table object
+            combined_table: Arrow table with data to merge
+            primary_keys: List of primary key column names
+            identifier: Table identifier for logging
+
+        Returns:
+            Tuple of (rows_deleted_estimate, rows_inserted)
+        """
+        from pyiceberg.expressions import In, And, EqualTo, Or
+
+        # Build delete filter from primary key values in incoming data
+        if len(primary_keys) == 1:
+            pk_col = primary_keys[0]
+            pk_values = combined_table.column(pk_col).to_pylist()
+            # Deduplicate values
+            unique_pk_values = list(set(pk_values))
+            delete_filter = In(pk_col, unique_pk_values)
+            deleted_estimate = len(unique_pk_values)
+        else:
+            # Composite primary key - build OR of AND conditions
+            pk_tuples = set()
+            for i in range(len(combined_table)):
+                pk_tuple = tuple(
+                    combined_table.column(pk).to_pylist()[i] for pk in primary_keys
+                )
+                pk_tuples.add(pk_tuple)
+
+            conditions = []
+            for pk_tuple in pk_tuples:
+                and_conditions = [
+                    EqualTo(pk, val) for pk, val in zip(primary_keys, pk_tuple)
+                ]
+                if len(and_conditions) == 1:
+                    conditions.append(and_conditions[0])
+                else:
+                    conditions.append(And(*and_conditions))
+
+            if len(conditions) == 1:
+                delete_filter = conditions[0]
+            else:
+                delete_filter = Or(*conditions)
+            deleted_estimate = len(pk_tuples)
+
+        logger.info(
+            f"Delete-insert for {identifier}: deleting up to {deleted_estimate} "
+            f"matching rows, inserting {len(combined_table)} rows"
+        )
+
+        # Execute atomic delete + append using transaction
+        with iceberg_table.transaction() as txn:
+            txn.delete(delete_filter)
+            txn.append(combined_table)
+
+        return (deleted_estimate, len(combined_table))
+
     def _commit_table_files(
         self,
         catalog,
@@ -449,13 +535,18 @@ class IcebergRestClient(JobClientBase):
                 )
 
                 # ATOMIC COMMIT: Write all data in one transaction
-                if write_disposition == "replace":
+                # Handle both string and dict write_disposition
+                disposition_type = write_disposition
+                if isinstance(write_disposition, dict):
+                    disposition_type = write_disposition.get("disposition", "append")
+
+                if disposition_type == "replace":
                     logger.info(f"Overwriting table {identifier}")
                     iceberg_table.overwrite(combined_table)
-                elif write_disposition == "append":
+                elif disposition_type == "append":
                     logger.info(f"Appending to table {identifier}")
                     iceberg_table.append(combined_table)
-                elif write_disposition == "merge":
+                elif disposition_type == "merge":
                     # Get primary keys
                     primary_keys = table_schema.get("primary_key") or table_schema.get("x-merge-keys")
 
@@ -473,38 +564,53 @@ class IcebergRestClient(JobClientBase):
                         )
                         iceberg_table.append(combined_table)
                     else:
-                        logger.info(f"Merging into table {identifier} on keys {primary_keys}")
+                        # Get merge strategy
+                        merge_strategy = self._get_merge_strategy(table_schema)
+                        logger.info(
+                            f"Merging into table {identifier} on keys {primary_keys} "
+                            f"using strategy: {merge_strategy}"
+                        )
 
-                        # Batch upserts to avoid memory issues on large datasets
-                        batch_size = self.config.merge_batch_size
-                        total_updated = 0
-                        total_inserted = 0
+                        if merge_strategy == "delete-insert":
+                            # Atomic delete + insert
+                            deleted, inserted = self._execute_delete_insert(
+                                iceberg_table, combined_table, primary_keys, identifier
+                            )
+                            logger.info(
+                                f"Delete-insert completed: ~{deleted} deleted, "
+                                f"{inserted} inserted"
+                            )
+                        else:
+                            # Default: upsert strategy
+                            batch_size = self.config.merge_batch_size
+                            total_updated = 0
+                            total_inserted = 0
 
-                        for batch_start in range(0, len(combined_table), batch_size):
-                            batch_end = min(batch_start + batch_size, len(combined_table))
-                            batch = combined_table.slice(batch_start, batch_end - batch_start)
+                            for batch_start in range(0, len(combined_table), batch_size):
+                                batch_end = min(batch_start + batch_size, len(combined_table))
+                                batch = combined_table.slice(batch_start, batch_end - batch_start)
+
+                                logger.info(
+                                    f"Upserting batch {batch_start//batch_size + 1}: "
+                                    f"rows {batch_start} to {batch_end} ({len(batch)} rows)"
+                                )
+
+                                upsert_result = iceberg_table.upsert(
+                                    df=batch,
+                                    join_cols=primary_keys,
+                                    when_matched_update_all=True,
+                                    when_not_matched_insert_all=True,
+                                )
+
+                                total_updated += upsert_result.rows_updated
+                                total_inserted += upsert_result.rows_inserted
 
                             logger.info(
-                                f"Upserting batch {batch_start//batch_size + 1}: "
-                                f"rows {batch_start} to {batch_end} ({len(batch)} rows)"
+                                f"Upsert completed: {total_updated} updated, "
+                                f"{total_inserted} inserted across {(total_rows + batch_size - 1) // batch_size} batches"
                             )
-
-                            upsert_result = iceberg_table.upsert(
-                                df=batch,
-                                join_cols=primary_keys,
-                                when_matched_update_all=True,
-                                when_not_matched_insert_all=True,
-                            )
-
-                            total_updated += upsert_result.rows_updated
-                            total_inserted += upsert_result.rows_inserted
-
-                        logger.info(
-                            f"Upsert completed: {total_updated} updated, "
-                            f"{total_inserted} inserted across {(total_rows + batch_size - 1) // batch_size} batches"
-                        )
                 else:
-                    raise ValueError(f"Unknown write disposition: {write_disposition}")
+                    raise ValueError(f"Unknown write disposition: {disposition_type}")
 
                 logger.info(
                     f"Successfully committed {len(file_data)} files "
@@ -600,7 +706,7 @@ class iceberg_rest_class_based(Destination[IcebergRestConfiguration, "IcebergRes
         caps.supported_staging_file_formats = []
 
         # Merge strategies (we handle upsert ourselves)
-        caps.supported_merge_strategies = ["upsert"]
+        caps.supported_merge_strategies = ["delete-insert", "upsert"]
 
         # Replace strategies
         caps.supported_replace_strategies = ["truncate-and-insert", "insert-from-staging"]

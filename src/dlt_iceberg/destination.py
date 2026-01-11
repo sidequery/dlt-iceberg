@@ -37,6 +37,87 @@ from pyiceberg.io.pyarrow import schema_to_pyarrow
 logger = logging.getLogger(__name__)
 
 
+def _get_merge_strategy(table_schema: TTableSchema) -> str:
+    """Extract merge strategy from table schema.
+
+    write_disposition can be:
+    - "merge" (string) -> use upsert (backward compatible)
+    - {"disposition": "merge", "strategy": "delete-insert"} -> explicit strategy
+
+    Returns:
+        Merge strategy: "upsert" or "delete-insert"
+    """
+    write_disposition = table_schema.get("write_disposition", "append")
+
+    if isinstance(write_disposition, dict):
+        return write_disposition.get("strategy", "delete-insert")
+
+    # String "merge" - use upsert as our default (backward compatible)
+    return "upsert"
+
+
+def _execute_delete_insert(iceberg_table, arrow_table, primary_keys: list, identifier: str):
+    """Execute delete-insert merge strategy.
+
+    Deletes rows matching primary keys in incoming data, then appends new data.
+    Uses PyIceberg transaction for atomic delete + append.
+
+    Args:
+        iceberg_table: PyIceberg table object
+        arrow_table: Arrow table with data to merge
+        primary_keys: List of primary key column names
+        identifier: Table identifier for logging
+
+    Returns:
+        Tuple of (rows_deleted_estimate, rows_inserted)
+    """
+    from pyiceberg.expressions import In, And, EqualTo, Or
+
+    # Build delete filter from primary key values in incoming data
+    if len(primary_keys) == 1:
+        pk_col = primary_keys[0]
+        pk_values = arrow_table.column(pk_col).to_pylist()
+        unique_pk_values = list(set(pk_values))
+        delete_filter = In(pk_col, unique_pk_values)
+        deleted_estimate = len(unique_pk_values)
+    else:
+        # Composite primary key - build OR of AND conditions
+        pk_tuples = set()
+        for i in range(len(arrow_table)):
+            pk_tuple = tuple(
+                arrow_table.column(pk).to_pylist()[i] for pk in primary_keys
+            )
+            pk_tuples.add(pk_tuple)
+
+        conditions = []
+        for pk_tuple in pk_tuples:
+            and_conditions = [
+                EqualTo(pk, val) for pk, val in zip(primary_keys, pk_tuple)
+            ]
+            if len(and_conditions) == 1:
+                conditions.append(and_conditions[0])
+            else:
+                conditions.append(And(*and_conditions))
+
+        if len(conditions) == 1:
+            delete_filter = conditions[0]
+        else:
+            delete_filter = Or(*conditions)
+        deleted_estimate = len(pk_tuples)
+
+    logger.info(
+        f"Delete-insert for {identifier}: deleting up to {deleted_estimate} "
+        f"matching rows, inserting {len(arrow_table)} rows"
+    )
+
+    # Execute atomic delete + append using transaction
+    with iceberg_table.transaction() as txn:
+        txn.delete(delete_filter)
+        txn.append(arrow_table)
+
+    return (deleted_estimate, len(arrow_table))
+
+
 def _iceberg_rest_handler(
     items: str,  # File path when batch_size=0
     table: TTableSchema,
@@ -270,13 +351,18 @@ def _iceberg_rest_handler(
                 raise
 
             # Write data based on disposition
-            if write_disposition == "replace":
+            # Handle both string and dict write_disposition
+            disposition_type = write_disposition
+            if isinstance(write_disposition, dict):
+                disposition_type = write_disposition.get("disposition", "append")
+
+            if disposition_type == "replace":
                 logger.info(f"Overwriting table {identifier}")
                 iceberg_table.overwrite(arrow_table)
-            elif write_disposition == "append":
+            elif disposition_type == "append":
                 logger.info(f"Appending to table {identifier}")
                 iceberg_table.append(arrow_table)
-            elif write_disposition == "merge":
+            elif disposition_type == "merge":
                 # For merge, we need primary keys
                 # Try multiple ways to get primary keys from dlt table schema
                 primary_keys = table.get("primary_key") or table.get("x-merge-keys")
@@ -296,21 +382,36 @@ def _iceberg_rest_handler(
                     )
                     iceberg_table.append(arrow_table)
                 else:
-                    logger.info(f"Merging into table {identifier} on keys {primary_keys}")
-                    # Use PyIceberg's upsert API to update existing rows and insert new ones
-                    # PyIceberg will automatically match rows based on join_cols (primary keys)
-                    upsert_result = iceberg_table.upsert(
-                        df=arrow_table,
-                        join_cols=primary_keys,
-                        when_matched_update_all=True,
-                        when_not_matched_insert_all=True,
-                    )
+                    # Get merge strategy
+                    merge_strategy = _get_merge_strategy(table)
                     logger.info(
-                        f"Upsert completed: {upsert_result.rows_updated} updated, "
-                        f"{upsert_result.rows_inserted} inserted"
+                        f"Merging into table {identifier} on keys {primary_keys} "
+                        f"using strategy: {merge_strategy}"
                     )
+
+                    if merge_strategy == "delete-insert":
+                        # Atomic delete + insert
+                        deleted, inserted = _execute_delete_insert(
+                            iceberg_table, arrow_table, primary_keys, identifier
+                        )
+                        logger.info(
+                            f"Delete-insert completed: ~{deleted} deleted, "
+                            f"{inserted} inserted"
+                        )
+                    else:
+                        # Default: upsert strategy
+                        upsert_result = iceberg_table.upsert(
+                            df=arrow_table,
+                            join_cols=primary_keys,
+                            when_matched_update_all=True,
+                            when_not_matched_insert_all=True,
+                        )
+                        logger.info(
+                            f"Upsert completed: {upsert_result.rows_updated} updated, "
+                            f"{upsert_result.rows_inserted} inserted"
+                        )
             else:
-                raise ValueError(f"Unknown write disposition: {write_disposition}")
+                raise ValueError(f"Unknown write disposition: {disposition_type}")
 
             logger.info(f"Successfully wrote {len(arrow_table)} rows to {identifier}")
             return  # Success
@@ -391,7 +492,7 @@ def iceberg_rest(**kwargs):
     def _raw_capabilities_with_merge():
         """Add merge support to the destination capabilities."""
         caps = original_raw_capabilities()
-        caps.supported_merge_strategies = ["upsert"]
+        caps.supported_merge_strategies = ["delete-insert", "upsert"]
         return caps
 
     # Bind the new method to the instance
