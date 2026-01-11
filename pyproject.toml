@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
     "boto3>=1.40.50",
     "dlt>=1.17.1",
+    "duckdb>=1.4.3",
     "pandas>=2.3.3",
     "pyarrow>=21.0.0",
     "pydantic<2.11",
