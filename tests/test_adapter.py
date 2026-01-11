@@ -44,7 +44,7 @@ class TestPartitionTransform:
         assert pt.to_hint_value() == "hour"
 
     def test_bucket_transform(self):
-        pt = iceberg_partition.bucket("user_id", 10)
+        pt = iceberg_partition.bucket(10, "user_id")
         assert pt.column == "user_id"
         assert pt.transform == "bucket"
         assert pt.param == 10
@@ -52,12 +52,12 @@ class TestPartitionTransform:
 
     def test_bucket_invalid_count(self):
         with pytest.raises(ValueError, match="must be positive"):
-            iceberg_partition.bucket("user_id", 0)
+            iceberg_partition.bucket(0, "user_id")
         with pytest.raises(ValueError, match="must be positive"):
-            iceberg_partition.bucket("user_id", -5)
+            iceberg_partition.bucket(-5, "user_id")
 
     def test_truncate_transform(self):
-        pt = iceberg_partition.truncate("email", 4)
+        pt = iceberg_partition.truncate(4, "email")
         assert pt.column == "email"
         assert pt.transform == "truncate"
         assert pt.param == 4
@@ -65,7 +65,19 @@ class TestPartitionTransform:
 
     def test_truncate_invalid_width(self):
         with pytest.raises(ValueError, match="must be positive"):
-            iceberg_partition.truncate("email", 0)
+            iceberg_partition.truncate(0, "email")
+
+    def test_custom_partition_name(self):
+        pt = iceberg_partition.year("created_at", "year_created")
+        assert pt.column == "created_at"
+        assert pt.transform == "year"
+        assert pt.name == "year_created"
+
+    def test_bucket_with_custom_name(self):
+        pt = iceberg_partition.bucket(8, "user_id", "user_bucket")
+        assert pt.column == "user_id"
+        assert pt.param == 8
+        assert pt.name == "user_bucket"
 
 
 class TestIcebergAdapter:
@@ -96,7 +108,7 @@ class TestIcebergAdapter:
             partition=[
                 iceberg_partition.day("sale_date"),
                 iceberg_partition.identity("region"),
-                iceberg_partition.bucket("user_id", 5),
+                iceberg_partition.bucket(5, "user_id"),
             ],
         )
 
@@ -197,7 +209,7 @@ class TestIcebergAdapterE2E:
                 events,
                 partition=[
                     iceberg_partition.day("event_date"),
-                    iceberg_partition.bucket("user_id", 3),
+                    iceberg_partition.bucket(3, "user_id"),
                 ],
             )
 

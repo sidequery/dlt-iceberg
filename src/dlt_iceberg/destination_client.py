@@ -10,7 +10,7 @@ import time
 import threading
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Iterable, Tuple, Type
+from typing import Any, Dict, List, Optional, Iterable, Tuple, Type
 from types import TracebackType
 
 import pyarrow as pa
@@ -95,6 +95,18 @@ class IcebergRestConfiguration(DestinationClientConfiguration):
 
     # Merge batch size (for upsert operations to avoid memory issues)
     merge_batch_size: int = 500000
+
+    # Table location layout - controls directory structure for table files
+    # Supports patterns: {namespace}, {dataset_name}, {table_name}
+    # Example: "{namespace}/{table_name}" or "warehouse/{dataset_name}/{table_name}"
+    table_location_layout: Optional[str] = None
+
+    # Register tables found in storage but missing from catalog (backward compatibility)
+    register_new_tables: bool = False
+
+    # Hard delete column name - rows with this column set will be deleted during merge
+    # Set to None to disable hard delete
+    hard_delete_column: Optional[str] = "_dlt_deleted_at"
 
 
 class IcebergRestLoadJob(RunnableLoadJob):
@@ -214,6 +226,123 @@ class IcebergRestClient(JobClientBase):
         self._catalog = load_catalog("dlt_catalog", **catalog_config)
         return self._catalog
 
+    def _get_table_location(self, table_name: str) -> Optional[str]:
+        """
+        Get the table location based on table_location_layout configuration.
+
+        Args:
+            table_name: Name of the table
+
+        Returns:
+            Table location string or None to use catalog default
+        """
+        if not self.config.table_location_layout:
+            return None
+
+        # Get warehouse base from config
+        warehouse = self.config.warehouse or ""
+
+        # Build location from layout pattern
+        location = self.config.table_location_layout.format(
+            namespace=self.config.namespace,
+            dataset_name=self.config.namespace,  # In dlt, dataset_name maps to namespace
+            table_name=table_name,
+        )
+
+        # If layout is relative (doesn't start with protocol), prepend warehouse
+        if not location.startswith(("s3://", "gs://", "az://", "file://", "hdfs://")):
+            # Ensure warehouse ends with / for proper joining
+            if warehouse and not warehouse.endswith("/"):
+                warehouse += "/"
+            location = f"{warehouse}{location}"
+
+        return location
+
+    def _register_tables_from_storage(self, catalog, namespace: str) -> None:
+        """
+        Register tables found in storage but missing from catalog.
+
+        Scans the warehouse directory for Iceberg metadata files and registers
+        any tables not already in the catalog. This provides backward compatibility
+        when tables exist in storage but haven't been registered.
+        """
+        if not self.config.register_new_tables:
+            return
+
+        if not self.config.warehouse:
+            logger.warning("Cannot register tables: no warehouse configured")
+            return
+
+        import os
+        from urllib.parse import urlparse
+
+        warehouse = self.config.warehouse
+
+        # Only support local filesystem for now
+        parsed = urlparse(warehouse)
+        if parsed.scheme and parsed.scheme != "file":
+            logger.info(
+                f"register_new_tables only supported for local filesystem, "
+                f"skipping for {parsed.scheme}"
+            )
+            return
+
+        # Get local path
+        local_path = parsed.path if parsed.scheme == "file" else warehouse
+        namespace_path = os.path.join(local_path, namespace)
+
+        if not os.path.exists(namespace_path):
+            logger.info(f"Namespace path {namespace_path} doesn't exist, nothing to register")
+            return
+
+        # Get existing tables in catalog
+        try:
+            existing_tables = {t[1] for t in catalog.list_tables(namespace)}
+        except NoSuchNamespaceError:
+            existing_tables = set()
+
+        # Scan for table directories with metadata
+        registered_count = 0
+        for item in os.listdir(namespace_path):
+            table_path = os.path.join(namespace_path, item)
+            if not os.path.isdir(table_path):
+                continue
+
+            # Check if it's an Iceberg table (has metadata directory)
+            metadata_path = os.path.join(table_path, "metadata")
+            if not os.path.exists(metadata_path):
+                continue
+
+            table_name = item
+            if table_name in existing_tables:
+                continue
+
+            # Find latest metadata file
+            metadata_files = [
+                f for f in os.listdir(metadata_path)
+                if f.endswith(".metadata.json")
+            ]
+            if not metadata_files:
+                continue
+
+            # Sort to get latest (by version number in filename)
+            metadata_files.sort(reverse=True)
+            latest_metadata = os.path.join(metadata_path, metadata_files[0])
+
+            try:
+                identifier = f"{namespace}.{table_name}"
+                catalog.register_table(
+                    identifier=identifier,
+                    metadata_location=f"file://{latest_metadata}",
+                )
+                logger.info(f"Registered table {identifier} from storage")
+                registered_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to register table {table_name}: {e}")
+
+        if registered_count > 0:
+            logger.info(f"Registered {registered_count} tables from storage")
+
     def initialize_storage(self, truncate_tables: Optional[Iterable[str]] = None) -> None:
         """Create Iceberg namespace if it doesn't exist."""
         catalog = self._get_catalog()
@@ -229,6 +358,9 @@ class IcebergRestClient(JobClientBase):
         except Exception as e:
             logger.error(f"Failed to initialize storage: {e}")
             raise
+
+        # Register tables from storage if enabled
+        self._register_tables_from_storage(catalog, namespace)
 
         # Handle truncation if requested
         if truncate_tables:
@@ -375,20 +507,22 @@ class IcebergRestClient(JobClientBase):
         combined_table: pa.Table,
         primary_keys: List[str],
         identifier: str,
-    ) -> Tuple[int, int]:
-        """Execute delete-insert merge strategy.
+        hard_delete_filter=None,
+    ) -> Tuple[int, int, int]:
+        """Execute delete-insert merge strategy with optional hard deletes.
 
         Deletes rows matching primary keys in incoming data, then appends new data.
-        Uses PyIceberg transaction for atomic delete + append.
+        Uses PyIceberg transaction for atomic hard-delete + delete + append.
 
         Args:
             iceberg_table: PyIceberg table object
             combined_table: Arrow table with data to merge
             primary_keys: List of primary key column names
             identifier: Table identifier for logging
+            hard_delete_filter: Optional filter for hard deletes (rows to permanently remove)
 
         Returns:
-            Tuple of (rows_deleted_estimate, rows_inserted)
+            Tuple of (rows_deleted_estimate, rows_inserted, hard_deleted)
         """
         from pyiceberg.expressions import In, And, EqualTo, Or
 
@@ -430,12 +564,86 @@ class IcebergRestClient(JobClientBase):
             f"matching rows, inserting {len(combined_table)} rows"
         )
 
-        # Execute atomic delete + append using transaction
+        # Execute atomic hard-delete + delete + append using single transaction
         with iceberg_table.transaction() as txn:
+            # Hard deletes first (permanent removal)
+            if hard_delete_filter is not None:
+                txn.delete(hard_delete_filter)
+            # Then delete-insert for merge
             txn.delete(delete_filter)
             txn.append(combined_table)
 
-        return (deleted_estimate, len(combined_table))
+        return (deleted_estimate, len(combined_table), 1 if hard_delete_filter else 0)
+
+    def _prepare_hard_deletes(
+        self,
+        combined_table: pa.Table,
+        primary_keys: List[str],
+    ) -> Tuple[pa.Table, Optional[Any], int]:
+        """
+        Prepare hard deletes from incoming data (does not execute).
+
+        Rows with the hard_delete_column set (non-null) will be deleted.
+        Returns the filter expression to use in a transaction.
+
+        Args:
+            combined_table: Arrow table with data including possible delete markers
+            primary_keys: List of primary key column names
+
+        Returns:
+            Tuple of (remaining_rows, delete_filter_or_none, num_to_delete)
+        """
+        hard_delete_col = self.config.hard_delete_column
+
+        # Check if hard delete column exists in data
+        if not hard_delete_col or hard_delete_col not in combined_table.column_names:
+            return combined_table, None, 0
+
+        from pyiceberg.expressions import In, And, EqualTo, Or
+        import pyarrow.compute as pc
+
+        # Get the delete marker column
+        delete_col = combined_table.column(hard_delete_col)
+
+        # Find rows marked for deletion (non-null values)
+        delete_mask = pc.is_valid(delete_col)
+        rows_to_delete = combined_table.filter(delete_mask)
+        rows_to_keep = combined_table.filter(pc.invert(delete_mask))
+
+        if len(rows_to_delete) == 0:
+            return rows_to_keep, None, 0
+
+        # Build delete filter from primary keys of rows to delete
+        if len(primary_keys) == 1:
+            pk_col = primary_keys[0]
+            pk_values = rows_to_delete.column(pk_col).to_pylist()
+            unique_pk_values = list(set(pk_values))
+            delete_filter = In(pk_col, unique_pk_values)
+        else:
+            # Composite primary key
+            pk_tuples = set()
+            for i in range(len(rows_to_delete)):
+                pk_tuple = tuple(
+                    rows_to_delete.column(pk).to_pylist()[i] for pk in primary_keys
+                )
+                pk_tuples.add(pk_tuple)
+
+            conditions = []
+            for pk_tuple in pk_tuples:
+                and_conditions = [
+                    EqualTo(pk, val) for pk, val in zip(primary_keys, pk_tuple)
+                ]
+                if len(and_conditions) == 1:
+                    conditions.append(and_conditions[0])
+                else:
+                    conditions.append(And(*and_conditions))
+
+            if len(conditions) == 1:
+                delete_filter = conditions[0]
+            else:
+                delete_filter = Or(*conditions)
+
+        return rows_to_keep, delete_filter, len(rows_to_delete)
 
     def _commit_table_files(
         self,
@@ -487,11 +695,19 @@ class IcebergRestClient(JobClientBase):
 
                     # Create table
                     logger.info(f"Creating table {identifier}")
-                    iceberg_table = catalog.create_table(
-                        identifier=identifier,
-                        schema=iceberg_schema,
-                        partition_spec=partition_spec,
-                    )
+
+                    # Get custom location if configured
+                    table_location = self._get_table_location(table_name)
+                    create_kwargs = {
+                        "identifier": identifier,
+                        "schema": iceberg_schema,
+                        "partition_spec": partition_spec,
+                    }
+                    if table_location:
+                        create_kwargs["location"] = table_location
+                        logger.info(f"Using custom location: {table_location}")
+
+                    iceberg_table = catalog.create_table(**create_kwargs)
                     logger.info(f"Created table {identifier} at {iceberg_table.location()}")
                 else:
                     # Table exists - check if schema evolution is needed
@@ -564,6 +780,20 @@ class IcebergRestClient(JobClientBase):
                         )
                         iceberg_table.append(combined_table)
                     else:
+                        # Prepare hard deletes (rows marked for deletion)
+                        remaining_rows, hard_delete_filter, num_hard_deletes = self._prepare_hard_deletes(
+                            combined_table, primary_keys
+                        )
+                        if num_hard_deletes > 0:
+                            logger.info(f"Prepared {num_hard_deletes} rows for hard delete")
+
+                        # If all rows were hard deletes, just execute the delete
+                        if len(remaining_rows) == 0:
+                            if hard_delete_filter is not None:
+                                iceberg_table.delete(hard_delete_filter)
+                                logger.info(f"Executed {num_hard_deletes} hard deletes (no merge needed)")
+                            return
+
                         # Get merge strategy
                         merge_strategy = self._get_merge_strategy(table_schema)
                         logger.info(
@@ -572,9 +802,10 @@ class IcebergRestClient(JobClientBase):
                         )
 
                         if merge_strategy == "delete-insert":
-                            # Atomic delete + insert
-                            deleted, inserted = self._execute_delete_insert(
-                                iceberg_table, combined_table, primary_keys, identifier
+                            # Atomic hard-delete + delete + insert in single transaction
+                            deleted, inserted, _ = self._execute_delete_insert(
+                                iceberg_table, remaining_rows, primary_keys, identifier,
+                                hard_delete_filter=hard_delete_filter
                             )
                             logger.info(
                                 f"Delete-insert completed: ~{deleted} deleted, "
@@ -582,13 +813,18 @@ class IcebergRestClient(JobClientBase):
                             )
                         else:
                             # Default: upsert strategy
+                            # Execute hard deletes first (separate transaction since upsert is atomic)
+                            if hard_delete_filter is not None:
+                                iceberg_table.delete(hard_delete_filter)
+                                logger.info(f"Executed {num_hard_deletes} hard deletes before upsert")
+
                             batch_size = self.config.merge_batch_size
                             total_updated = 0
                             total_inserted = 0
 
-                            for batch_start in range(0, len(combined_table), batch_size):
-                                batch_end = min(batch_start + batch_size, len(combined_table))
-                                batch = combined_table.slice(batch_start, batch_end - batch_start)
+                            for batch_start in range(0, len(remaining_rows), batch_size):
+                                batch_end = min(batch_start + batch_size, len(remaining_rows))
+                                batch = remaining_rows.slice(batch_start, batch_end - batch_start)
 
                                 logger.info(
                                     f"Upserting batch {batch_start//batch_size + 1}: "
@@ -607,7 +843,7 @@ class IcebergRestClient(JobClientBase):
 
                             logger.info(
                                 f"Upsert completed: {total_updated} updated, "
-                                f"{total_inserted} inserted across {(total_rows + batch_size - 1) // batch_size} batches"
+                                f"{total_inserted} inserted across {(len(remaining_rows) + batch_size - 1) // batch_size} batches"
                             )
                 else:
                     raise ValueError(f"Unknown write disposition: {disposition_type}")

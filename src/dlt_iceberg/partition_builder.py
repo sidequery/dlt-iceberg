@@ -182,16 +182,21 @@ def build_partition_spec(
             continue
 
         # Choose transform based on data type
+        col_hints = dlt_columns.get(col_name, {})
         transform = choose_partition_transform(
-            iceberg_field.field_type, col_name, dlt_columns.get(col_name, {})
+            iceberg_field.field_type, col_name, col_hints
         )
+
+        # Get custom partition field name or generate default
+        custom_name = col_hints.get("x-partition-name") or col_hints.get("partition_name")
+        partition_name = custom_name or f"{col_name}_{get_transform_name(transform)}"
 
         # Create partition field
         partition_field = PartitionField(
             source_id=iceberg_field.field_id,
             field_id=1000 + len(partition_fields),  # Start partition IDs at 1000
             transform=transform,
-            name=f"{col_name}_{get_transform_name(transform)}",
+            name=partition_name,
         )
         partition_fields.append(partition_field)
 
