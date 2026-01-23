@@ -456,3 +456,50 @@ def test_real_world_iceberg_scenario():
     result = cast_table_safe(table, iceberg_schema, strict=True)
     assert len(result) == 3
     assert result.schema == iceberg_schema
+
+
+def test_cast_table_safe_different_field_order():
+    """
+    Test that cast_table_safe handles tables with different field ordering.
+
+    This is a regression test for the field ordering bug where cast_table_safe
+    fails when the source table has fields in a different order than the target
+    schema, even when all field names and types match exactly.
+
+    This commonly occurs when loading JSON data where field order isn't guaranteed
+    (e.g., different API responses or extraction runs).
+    """
+    # Source table with fields in order: a, b, c
+    source_schema = pa.schema([
+        pa.field("a", pa.int64()),
+        pa.field("b", pa.string()),
+        pa.field("c", pa.float64()),
+    ])
+
+    table = pa.table(
+        {
+            "a": [1, 2, 3],
+            "b": ["x", "y", "z"],
+            "c": [1.1, 2.2, 3.3],
+        },
+        schema=source_schema
+    )
+
+    # Target schema with same fields but different order: c, b, a
+    target_schema = pa.schema([
+        pa.field("c", pa.float64()),
+        pa.field("b", pa.string()),
+        pa.field("a", pa.int64()),
+    ])
+
+    # This should succeed - all field names and types match
+    # Currently fails with: "Target schema's field names are not matching the table's field names"
+    result = cast_table_safe(table, target_schema, strict=True)
+
+    assert len(result) == 3
+    assert result.schema == target_schema
+    # Verify columns are reordered correctly
+    assert result.column_names == ["c", "b", "a"]
+    assert result["a"].to_pylist() == [1, 2, 3]
+    assert result["b"].to_pylist() == ["x", "y", "z"]
+    assert result["c"].to_pylist() == [1.1, 2.2, 3.3]
