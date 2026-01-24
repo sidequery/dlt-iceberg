@@ -36,7 +36,7 @@ def test_fresh_pipeline_restores_schema_from_destination():
     print(f"   Catalog: {catalog_path}")
 
     try:
-        from dlt_iceberg.destination import iceberg_rest
+        from dlt_iceberg import iceberg_rest
         import uuid
 
         pipeline_name = f"test_state_sync_{uuid.uuid4().hex[:8]}"
