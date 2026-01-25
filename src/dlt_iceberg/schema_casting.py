@@ -436,6 +436,11 @@ def cast_table_safe(
         f"to schema with {len(target_schema)} fields"
     )
 
+    # Reorder columns to match target schema before casting
+    # PyArrow's cast() requires fields to be in the same order
+    target_field_names = [field.name for field in target_schema]
+    table = table.select(target_field_names)
+
     try:
         casted_table = table.cast(target_schema)
         logger.info("Cast completed successfully")
