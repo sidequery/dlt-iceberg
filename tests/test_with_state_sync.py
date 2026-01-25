@@ -309,6 +309,102 @@ class TestWithStateSyncMethods:
         assert result_none is None, "Should return None for non-existent pipeline"
         print("   Correctly returned None for non-existent pipeline")
 
+    def test_derive_schema_from_iceberg_tables(self, catalog_setup, client):
+        """Test that schema can be derived from existing Iceberg tables."""
+        print("\nTest: derive schema from existing Iceberg tables")
+
+        catalog = catalog_setup["catalog"]
+
+        # Create an Iceberg table directly (simulating existing table)
+        iceberg_schema = IcebergSchema(
+            NestedField(1, "id", LongType(), required=True),
+            NestedField(2, "name", StringType(), required=False),
+            NestedField(3, "value", LongType(), required=False),
+        )
+
+        catalog.create_table(
+            identifier="test.user_data",
+            schema=iceberg_schema,
+        )
+        print("   Created test.user_data table with [id, name, value]")
+
+        # _dlt_version does NOT exist - fallback should derive from Iceberg
+        result = client.get_stored_schema("test_schema")
+        assert result is not None, "Should derive schema from Iceberg tables"
+        assert result.version_hash == "derived_from_iceberg", "Should mark as derived"
+
+        # Parse the schema and verify table was derived
+        schema_dict = json.loads(result.schema)
+        assert "user_data" in schema_dict["tables"], "Should include user_data table"
+
+        user_data = schema_dict["tables"]["user_data"]
+        assert "id" in user_data["columns"], "Should have 'id' column"
+        assert "name" in user_data["columns"], "Should have 'name' column"
+        assert "value" in user_data["columns"], "Should have 'value' column"
+
+        # Check column properties
+        assert user_data["columns"]["id"]["nullable"] is False, "id should be required"
+        assert user_data["columns"]["name"]["nullable"] is True, "name should be nullable"
+
+        print(f"   Derived schema with table: user_data ({len(user_data['columns'])} columns)")
+
+    def test_get_stored_schema_prefers_dlt_version_over_derivation(self, catalog_setup, client):
+        """Test that stored schema in _dlt_version takes precedence over derivation."""
+        print("\nTest: _dlt_version takes precedence over Iceberg derivation")
+
+        catalog = catalog_setup["catalog"]
+
+        # Create _dlt_version table with stored schema
+        iceberg_schema = IcebergSchema(
+            NestedField(1, "version_hash", StringType(), required=True),
+            NestedField(2, "schema_name", StringType(), required=True),
+            NestedField(3, "version", LongType(), required=True),
+            NestedField(4, "engine_version", LongType(), required=True),
+            NestedField(5, "inserted_at", TimestampType(), required=True),
+            NestedField(6, "schema", StringType(), required=True),
+        )
+
+        version_table = catalog.create_table(
+            identifier="test._dlt_version",
+            schema=iceberg_schema,
+        )
+
+        test_schema_dict = {"name": "test_schema", "tables": {"stored_table": {}}}
+        arrow_schema = pa.schema([
+            pa.field("version_hash", pa.string(), nullable=False),
+            pa.field("schema_name", pa.string(), nullable=False),
+            pa.field("version", pa.int64(), nullable=False),
+            pa.field("engine_version", pa.int64(), nullable=False),
+            pa.field("inserted_at", pa.timestamp("us"), nullable=False),
+            pa.field("schema", pa.string(), nullable=False),
+        ])
+        arrow_table = pa.table({
+            "version_hash": ["stored_hash"],
+            "schema_name": ["test_schema"],
+            "version": [5],
+            "engine_version": [1],
+            "inserted_at": [datetime.now()],
+            "schema": [json.dumps(test_schema_dict)],
+        }, schema=arrow_schema)
+
+        version_table.append(arrow_table)
+        print("   Created _dlt_version with stored schema")
+
+        # Also create an Iceberg table (which should NOT be used)
+        user_schema = IcebergSchema(
+            NestedField(1, "id", LongType(), required=True),
+        )
+        catalog.create_table(identifier="test.user_data", schema=user_schema)
+        print("   Created test.user_data table")
+
+        # get_stored_schema should return the stored schema, not derived
+        result = client.get_stored_schema("test_schema")
+        assert result is not None, "Should return stored schema"
+        assert result.version_hash == "stored_hash", "Should return stored schema, not derived"
+        assert result.version == 5, "Should return stored version"
+
+        print("   Correctly returned stored schema (not derived)")
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

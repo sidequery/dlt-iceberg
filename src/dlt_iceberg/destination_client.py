@@ -319,8 +319,19 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
             return None
 
     def get_stored_schema(self, schema_name: str = None) -> Optional[StorageSchemaInfo]:
-        """Retrieves newest schema from the _dlt_version table."""
-        return self._get_newest_schema(schema_name or self.schema.name)
+        """Retrieves newest schema from the _dlt_version table.
+
+        Falls back to deriving schema from existing Iceberg tables if no stored
+        schema exists. This handles scenarios where _dlt_version is empty/corrupted
+        but Iceberg tables already exist with columns that should be preserved.
+        """
+        # First try to get from _dlt_version
+        stored = self._get_newest_schema(schema_name or self.schema.name)
+        if stored:
+            return stored
+
+        # Fallback: derive schema from existing Iceberg tables
+        return self._derive_schema_from_iceberg_tables(schema_name or self.schema.name)
 
     def get_stored_schema_by_hash(self, version_hash: str) -> Optional[StorageSchemaInfo]:
         """Retrieves stored schema by its version hash."""
@@ -367,6 +378,154 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         except Exception as e:
             logger.warning(f"Failed to get state for pipeline {pipeline_name}: {e}")
             return None
+
+    def _derive_schema_from_iceberg_tables(self, schema_name: str) -> Optional[StorageSchemaInfo]:
+        """Derive a dlt schema from existing Iceberg table schemas in the catalog.
+
+        This is a fallback when _dlt_version has no stored schema but Iceberg
+        tables already exist. It reads table metadata from the catalog and
+        constructs a dlt schema that includes all existing columns.
+
+        Args:
+            schema_name: Name of the schema to derive
+
+        Returns:
+            StorageSchemaInfo with derived schema, or None if no tables exist
+        """
+        try:
+            catalog = self._get_catalog()
+
+            try:
+                tables = catalog.list_tables(self.config.namespace)
+            except NoSuchNamespaceError:
+                return None
+
+            if not tables:
+                return None
+
+            # Build a dlt schema from Iceberg table metadata
+            derived_tables = {}
+            for table_id in tables:
+                table_name = table_id[1]
+                if table_name.startswith('_dlt_'):
+                    continue  # Skip dlt metadata tables
+
+                try:
+                    iceberg_table = catalog.load_table(f"{self.config.namespace}.{table_name}")
+                    iceberg_schema = iceberg_table.schema()
+
+                    # Convert Iceberg schema to dlt table schema
+                    columns = {}
+                    for field in iceberg_schema.fields:
+                        columns[field.name] = {
+                            "name": field.name,
+                            "data_type": self._iceberg_type_to_dlt_type(field.field_type),
+                            "nullable": not field.required,
+                        }
+
+                    derived_tables[table_name] = {
+                        "name": table_name,
+                        "columns": columns,
+                    }
+                    logger.info(
+                        f"Derived schema for table {table_name} with "
+                        f"{len(columns)} columns from Iceberg metadata"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to derive schema for table {table_name}: {e}")
+                    continue
+
+            if not derived_tables:
+                return None
+
+            # Create a StorageSchemaInfo from derived schema
+            import json
+            from dlt.common.pendulum import pendulum
+            from dlt.common.schema import Schema as DltSchema
+
+            # Start with a fresh dlt schema to get proper structure and system tables
+            base_schema = DltSchema(schema_name)
+            schema_dict = base_schema.to_dict()
+
+            # Merge derived tables into the schema
+            for table_name, table_def in derived_tables.items():
+                schema_dict["tables"][table_name] = table_def
+
+            # Update version hash to indicate it was derived
+            schema_dict["version_hash"] = "derived_from_iceberg"
+
+            logger.info(
+                f"Derived schema '{schema_name}' from Iceberg catalog with "
+                f"{len(derived_tables)} tables"
+            )
+
+            return StorageSchemaInfo(
+                version_hash="derived_from_iceberg",
+                schema_name=schema_name,
+                version=1,
+                engine_version=self.schema.ENGINE_VERSION,
+                inserted_at=pendulum.now("UTC"),
+                schema=json.dumps(schema_dict),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to derive schema from Iceberg tables: {e}")
+            return None
+
+    def _iceberg_type_to_dlt_type(self, iceberg_type) -> str:
+        """Convert PyIceberg type to dlt data type string.
+
+        Args:
+            iceberg_type: PyIceberg type object
+
+        Returns:
+            dlt data type string
+        """
+        from pyiceberg.types import (
+            BooleanType,
+            IntegerType,
+            LongType,
+            FloatType,
+            DoubleType,
+            StringType,
+            BinaryType,
+            DateType,
+            TimeType,
+            TimestampType,
+            TimestamptzType,
+            DecimalType,
+            ListType,
+            MapType,
+            StructType,
+        )
+
+        type_mapping = {
+            BooleanType: "bool",
+            IntegerType: "bigint",  # dlt uses bigint for integers
+            LongType: "bigint",
+            FloatType: "double",
+            DoubleType: "double",
+            StringType: "text",
+            BinaryType: "binary",
+            DateType: "date",
+            TimeType: "time",
+            TimestampType: "timestamp",
+            TimestamptzType: "timestamp",
+        }
+
+        for iceberg_cls, dlt_type in type_mapping.items():
+            if isinstance(iceberg_type, iceberg_cls):
+                return dlt_type
+
+        if isinstance(iceberg_type, DecimalType):
+            return f"decimal({iceberg_type.precision},{iceberg_type.scale})"
+
+        if isinstance(iceberg_type, ListType):
+            return "complex"  # dlt complex type for nested structures
+
+        if isinstance(iceberg_type, (MapType, StructType)):
+            return "complex"
+
+        return "text"  # Default fallback
 
     def update_stored_schema(
         self,
