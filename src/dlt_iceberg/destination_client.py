@@ -23,8 +23,11 @@ from dlt.common.destination.client import (
     RunnableLoadJob,
     DestinationClientConfiguration,
     SupportsOpenTables,
+    WithStateSync,
+    StorageSchemaInfo,
+    StateInfo,
 )
-from dlt.common.schema.typing import TTableFormat
+from dlt.common.schema.typing import TTableFormat, TSchemaTables
 from dlt.destinations.sql_client import WithSqlClient, SqlClientBase
 from dlt.common.schema import Schema, TTableSchema
 from dlt.common.schema.typing import TTableSchema as PreparedTableSchema
@@ -159,12 +162,13 @@ class IcebergRestLoadJob(RunnableLoadJob):
             raise
 
 
-class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables):
+class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithStateSync):
     """
     Class-based Iceberg REST destination with atomic multi-file commits.
 
     Accumulates files during load and commits them atomically in complete_load().
     Implements WithSqlClient and SupportsOpenTables for pipeline.dataset() support.
+    Implements WithStateSync for schema restoration from destination.
     """
 
     def __init__(
@@ -249,6 +253,375 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables):
         """Check if a table uses the specified open table format."""
         # All tables in this destination are Iceberg tables
         return table_format == "iceberg"
+
+    # ---- WithStateSync interface ----
+
+    def _get_newest_schema(self, schema_name: str) -> Optional[StorageSchemaInfo]:
+        """Get newest schema version by schema name using predicate pushdown."""
+        try:
+            catalog = self._get_catalog()
+            identifier = f"{self.config.namespace}.{self.schema.version_table_name}"
+            iceberg_table = catalog.load_table(identifier)
+
+            # Use row_filter for predicate pushdown - only scan matching rows
+            table = iceberg_table.scan(
+                row_filter=f"schema_name = '{schema_name}'"
+            ).to_arrow()
+
+            if len(table) == 0:
+                return None
+
+            # Find row with max version
+            versions = table.column("version").to_pylist()
+            row_idx = versions.index(max(versions))
+
+            return StorageSchemaInfo(
+                version_hash=table.column("version_hash")[row_idx].as_py(),
+                schema_name=table.column("schema_name")[row_idx].as_py(),
+                version=table.column("version")[row_idx].as_py(),
+                engine_version=table.column("engine_version")[row_idx].as_py(),
+                inserted_at=table.column("inserted_at")[row_idx].as_py(),
+                schema=table.column("schema")[row_idx].as_py(),
+            )
+        except NoSuchTableError:
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get schema for {schema_name}: {e}")
+            return None
+
+    def _get_schema_by_hash(self, version_hash: str) -> Optional[StorageSchemaInfo]:
+        """Get schema by exact version hash using predicate pushdown."""
+        try:
+            catalog = self._get_catalog()
+            identifier = f"{self.config.namespace}.{self.schema.version_table_name}"
+            iceberg_table = catalog.load_table(identifier)
+
+            # Use row_filter for predicate pushdown
+            table = iceberg_table.scan(
+                row_filter=f"version_hash = '{version_hash}'"
+            ).to_arrow()
+
+            if len(table) == 0:
+                return None
+
+            return StorageSchemaInfo(
+                version_hash=table.column("version_hash")[0].as_py(),
+                schema_name=table.column("schema_name")[0].as_py(),
+                version=table.column("version")[0].as_py(),
+                engine_version=table.column("engine_version")[0].as_py(),
+                inserted_at=table.column("inserted_at")[0].as_py(),
+                schema=table.column("schema")[0].as_py(),
+            )
+        except NoSuchTableError:
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get schema by hash {version_hash}: {e}")
+            return None
+
+    def get_stored_schema(self, schema_name: str = None) -> Optional[StorageSchemaInfo]:
+        """Retrieves newest schema from the _dlt_version table.
+
+        Falls back to deriving schema from existing Iceberg tables if no stored
+        schema exists. This handles scenarios where _dlt_version is empty/corrupted
+        but Iceberg tables already exist with columns that should be preserved.
+        """
+        # First try to get from _dlt_version
+        stored = self._get_newest_schema(schema_name or self.schema.name)
+        if stored:
+            return stored
+
+        # Fallback: derive schema from existing Iceberg tables
+        return self._derive_schema_from_iceberg_tables(schema_name or self.schema.name)
+
+    def get_stored_schema_by_hash(self, version_hash: str) -> Optional[StorageSchemaInfo]:
+        """Retrieves stored schema by its version hash."""
+        return self._get_schema_by_hash(version_hash)
+
+    def get_stored_state(self, pipeline_name: str) -> Optional[StateInfo]:
+        """Loads pipeline state from the _dlt_pipeline_state table using predicate pushdown."""
+        try:
+            catalog = self._get_catalog()
+            identifier = f"{self.config.namespace}.{self.schema.state_table_name}"
+            iceberg_table = catalog.load_table(identifier)
+
+            # Use row_filter for predicate pushdown
+            table = iceberg_table.scan(
+                row_filter=f"pipeline_name = '{pipeline_name}'"
+            ).to_arrow()
+
+            if len(table) == 0:
+                return None
+
+            # Find row with max created_at
+            timestamps = table.column("created_at").to_pylist()
+            row_idx = timestamps.index(max(timestamps))
+
+            version_hash = None
+            if "version_hash" in table.column_names:
+                version_hash = table.column("version_hash")[row_idx].as_py()
+
+            dlt_load_id = None
+            if "_dlt_load_id" in table.column_names:
+                dlt_load_id = table.column("_dlt_load_id")[row_idx].as_py()
+
+            return StateInfo(
+                version=table.column("version")[row_idx].as_py(),
+                engine_version=table.column("engine_version")[row_idx].as_py(),
+                pipeline_name=table.column("pipeline_name")[row_idx].as_py(),
+                state=table.column("state")[row_idx].as_py(),
+                created_at=table.column("created_at")[row_idx].as_py(),
+                version_hash=version_hash,
+                _dlt_load_id=dlt_load_id,
+            )
+        except NoSuchTableError:
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get state for pipeline {pipeline_name}: {e}")
+            return None
+
+    def _derive_schema_from_iceberg_tables(self, schema_name: str) -> Optional[StorageSchemaInfo]:
+        """Derive a dlt schema from existing Iceberg table schemas in the catalog.
+
+        This is a fallback when _dlt_version has no stored schema but Iceberg
+        tables already exist. It reads table metadata from the catalog and
+        constructs a dlt schema that includes all existing columns.
+
+        Args:
+            schema_name: Name of the schema to derive
+
+        Returns:
+            StorageSchemaInfo with derived schema, or None if no tables exist
+        """
+        try:
+            catalog = self._get_catalog()
+
+            try:
+                tables = catalog.list_tables(self.config.namespace)
+            except NoSuchNamespaceError:
+                return None
+
+            if not tables:
+                return None
+
+            # Build a dlt schema from Iceberg table metadata
+            derived_tables = {}
+            for table_id in tables:
+                table_name = table_id[1]
+                if table_name.startswith('_dlt_'):
+                    continue  # Skip dlt metadata tables
+
+                try:
+                    iceberg_table = catalog.load_table(f"{self.config.namespace}.{table_name}")
+                    iceberg_schema = iceberg_table.schema()
+
+                    # Convert Iceberg schema to dlt table schema
+                    columns = {}
+                    for field in iceberg_schema.fields:
+                        columns[field.name] = {
+                            "name": field.name,
+                            "data_type": self._iceberg_type_to_dlt_type(field.field_type),
+                            "nullable": not field.required,
+                        }
+
+                    derived_tables[table_name] = {
+                        "name": table_name,
+                        "columns": columns,
+                    }
+                    logger.info(
+                        f"Derived schema for table {table_name} with "
+                        f"{len(columns)} columns from Iceberg metadata"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to derive schema for table {table_name}: {e}")
+                    continue
+
+            if not derived_tables:
+                return None
+
+            # Create a StorageSchemaInfo from derived schema
+            import json
+            from dlt.common.pendulum import pendulum
+            from dlt.common.schema import Schema as DltSchema
+
+            # Start with a fresh dlt schema to get proper structure and system tables
+            base_schema = DltSchema(schema_name)
+            schema_dict = base_schema.to_dict()
+
+            # Merge derived tables into the schema
+            for table_name, table_def in derived_tables.items():
+                schema_dict["tables"][table_name] = table_def
+
+            # Update version hash to indicate it was derived
+            schema_dict["version_hash"] = "derived_from_iceberg"
+
+            logger.info(
+                f"Derived schema '{schema_name}' from Iceberg catalog with "
+                f"{len(derived_tables)} tables"
+            )
+
+            return StorageSchemaInfo(
+                version_hash="derived_from_iceberg",
+                schema_name=schema_name,
+                version=1,
+                engine_version=self.schema.ENGINE_VERSION,
+                inserted_at=pendulum.now("UTC"),
+                schema=json.dumps(schema_dict),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to derive schema from Iceberg tables: {e}")
+            return None
+
+    def _iceberg_type_to_dlt_type(self, iceberg_type) -> str:
+        """Convert PyIceberg type to dlt data type string.
+
+        Args:
+            iceberg_type: PyIceberg type object
+
+        Returns:
+            dlt data type string
+        """
+        from pyiceberg.types import (
+            BooleanType,
+            IntegerType,
+            LongType,
+            FloatType,
+            DoubleType,
+            StringType,
+            BinaryType,
+            DateType,
+            TimeType,
+            TimestampType,
+            TimestamptzType,
+            DecimalType,
+            ListType,
+            MapType,
+            StructType,
+        )
+
+        type_mapping = {
+            BooleanType: "bool",
+            IntegerType: "bigint",  # dlt uses bigint for integers
+            LongType: "bigint",
+            FloatType: "double",
+            DoubleType: "double",
+            StringType: "text",
+            BinaryType: "binary",
+            DateType: "date",
+            TimeType: "time",
+            TimestampType: "timestamp",
+            TimestamptzType: "timestamp",
+        }
+
+        for iceberg_cls, dlt_type in type_mapping.items():
+            if isinstance(iceberg_type, iceberg_cls):
+                return dlt_type
+
+        if isinstance(iceberg_type, DecimalType):
+            return f"decimal({iceberg_type.precision},{iceberg_type.scale})"
+
+        if isinstance(iceberg_type, ListType):
+            return "complex"  # dlt complex type for nested structures
+
+        if isinstance(iceberg_type, (MapType, StructType)):
+            return "complex"
+
+        return "text"  # Default fallback
+
+    def update_stored_schema(
+        self,
+        only_tables: Iterable[str] = None,
+        expected_update: TSchemaTables = None,
+    ) -> Optional[TSchemaTables]:
+        """
+        Updates storage to the current schema.
+
+        Writes schema to _dlt_version table if it doesn't already exist.
+        """
+        applied_update = super().update_stored_schema(only_tables, expected_update)
+
+        # Check if schema with this hash already exists
+        current_hash = self.schema.stored_version_hash
+        if self._get_schema_by_hash(current_hash):
+            return applied_update
+
+        # Write schema to _dlt_version table
+        try:
+            self._write_schema_to_storage()
+        except Exception as e:
+            logger.warning(f"Failed to write schema to storage: {e}")
+
+        return applied_update
+
+    def _write_schema_to_storage(self) -> None:
+        """Write current schema to _dlt_version Iceberg table."""
+        from dlt.common.pendulum import pendulum
+        import json
+
+        catalog = self._get_catalog()
+        version_table_name = self.schema.version_table_name
+        identifier = f"{self.config.namespace}.{version_table_name}"
+
+        # Schema data to write
+        # Use naive datetime (no timezone) to match Iceberg TimestampType
+        inserted_at = pendulum.now("UTC").naive()
+        schema_data = {
+            "version_hash": self.schema.stored_version_hash,
+            "schema_name": self.schema.name,
+            "version": self.schema.version,
+            "engine_version": self.schema.ENGINE_VERSION,
+            "inserted_at": inserted_at,
+            "schema": json.dumps(self.schema.to_dict()),
+        }
+
+        # Create Arrow table with non-nullable schema to match Iceberg required fields
+        # Use timestamp without timezone to match Iceberg TimestampType()
+        arrow_schema = pa.schema([
+            pa.field("version_hash", pa.string(), nullable=False),
+            pa.field("schema_name", pa.string(), nullable=False),
+            pa.field("version", pa.int64(), nullable=False),
+            pa.field("engine_version", pa.int64(), nullable=False),
+            pa.field("inserted_at", pa.timestamp("us"), nullable=False),
+            pa.field("schema", pa.string(), nullable=False),
+        ])
+        arrow_table = pa.table({
+            "version_hash": [schema_data["version_hash"]],
+            "schema_name": [schema_data["schema_name"]],
+            "version": [schema_data["version"]],
+            "engine_version": [schema_data["engine_version"]],
+            "inserted_at": [schema_data["inserted_at"]],
+            "schema": [schema_data["schema"]],
+        }, schema=arrow_schema)
+
+        # Create or append to _dlt_version table
+        try:
+            iceberg_table = catalog.load_table(identifier)
+            iceberg_table.append(arrow_table)
+        except NoSuchTableError:
+            # Create the table
+            from pyiceberg.schema import Schema as IcebergSchema
+            from pyiceberg.types import (
+                NestedField,
+                StringType,
+                LongType,
+                TimestampType,
+            )
+
+            iceberg_schema = IcebergSchema(
+                NestedField(1, "version_hash", StringType(), required=True),
+                NestedField(2, "schema_name", StringType(), required=True),
+                NestedField(3, "version", LongType(), required=True),
+                NestedField(4, "engine_version", LongType(), required=True),
+                NestedField(5, "inserted_at", TimestampType(), required=True),
+                NestedField(6, "schema", StringType(), required=True),
+            )
+
+            iceberg_table = catalog.create_table(
+                identifier=identifier,
+                schema=iceberg_schema,
+            )
+            iceberg_table.append(arrow_table)
+
+        logger.info(f"Stored schema {self.schema.name} v{self.schema.version} to {identifier}")
 
     def _get_catalog(self):
         """Get or create catalog connection."""
