@@ -92,6 +92,10 @@ class IcebergRestConfiguration(DestinationClientConfiguration):
     s3_secret_access_key: Optional[str] = None
     s3_region: Optional[str] = None
 
+    py_io_impl: Optional[str] = None
+    # https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/pyarrow.py
+    # https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/fsspec.py
+
     # Retry configuration
     max_retries: int = 5
     retry_backoff_base: float = 2.0
@@ -113,6 +117,7 @@ class IcebergRestConfiguration(DestinationClientConfiguration):
     # Hard delete column name - rows with this column set will be deleted during merge
     # Set to None to disable hard delete
     hard_delete_column: Optional[str] = "_dlt_deleted_at"
+
 
 
 class IcebergRestLoadJob(RunnableLoadJob):
@@ -668,6 +673,12 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         if self.config.s3_region:
             catalog_config["s3.region"] = self.config.s3_region
 
+        if self.config.py_io_impl:
+            catalog_config["py-io-impl"] = self.config.py_io_impl
+        # For example:
+        # catalog_config["py-io-impl"] = "pyiceberg.io.fsspec.FsspecFileIO"
+        
+        
         logger.info(
             f"Creating catalog connection (type={catalog_type}, uri={self.config.catalog_uri})"
         )
