@@ -34,6 +34,7 @@ from pyiceberg.exceptions import (
     NoSuchTableError,
     NoSuchNamespaceError,
 )
+from pyiceberg.expressions import EqualTo
 
 from .schema_converter import convert_dlt_to_iceberg_schema
 from .partition_builder import build_partition_spec
@@ -578,8 +579,74 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables):
             }
         )
 
+        for attempt in range(self.config.max_retries):
+            try:
+                loads_table = self._get_or_create_loads_table(
+                    catalog, identifier, loads_table_name, load_row
+                )
+
+                # Idempotency: if this load_id was already recorded, do nothing.
+                if self._load_record_exists(loads_table, load_id):
+                    logger.info(f"Load {load_id} already recorded in {identifier}")
+                    return
+
+                expected_schema = schema_to_pyarrow(loads_table.schema())
+                casted_row = cast_table_safe(load_row, expected_schema, strict=False)
+                loads_table.append(casted_row)
+                return
+
+            except Exception as e:
+                retryable = is_retryable_error(e)
+
+                # Ambiguous write handling: append may have succeeded but client saw an error.
+                # Read-after-error: if record exists now, treat as success.
+                if self._load_record_exists_in_catalog(catalog, identifier, load_id):
+                    logger.warning(
+                        f"Encountered error while recording load {load_id} but record exists; "
+                        f"treating as success: {e}"
+                    )
+                    return
+
+                log_error_with_context(
+                    e,
+                    operation=f"record load in {identifier}",
+                    table_name=loads_table_name,
+                    attempt=attempt + 1,
+                    max_attempts=self.config.max_retries,
+                    include_traceback=not retryable,
+                )
+
+                if not retryable:
+                    error_msg = get_user_friendly_error_message(
+                        e, f"record load metadata in table {identifier}"
+                    )
+                    raise RuntimeError(error_msg) from e
+
+                if attempt >= self.config.max_retries - 1:
+                    error_msg = get_user_friendly_error_message(
+                        e,
+                        f"record load metadata in table {identifier} after "
+                        f"{self.config.max_retries} attempts",
+                    )
+                    raise RuntimeError(error_msg) from e
+
+                sleep_time = self.config.retry_backoff_base ** attempt
+                logger.info(
+                    f"Retrying load metadata write after {sleep_time}s "
+                    f"(attempt {attempt + 2}/{self.config.max_retries})"
+                )
+                time.sleep(sleep_time)
+
+    def _get_or_create_loads_table(
+        self,
+        catalog,
+        identifier: str,
+        loads_table_name: str,
+        load_row: pa.Table,
+    ):
+        """Load the internal _dlt_loads table, creating it if needed."""
         try:
-            loads_table = catalog.load_table(identifier)
+            return catalog.load_table(identifier)
         except NoSuchTableError:
             from pyiceberg.partitioning import PartitionSpec
 
@@ -592,11 +659,20 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables):
                 schema=loads_schema,
                 partition_spec=PartitionSpec(),
             )
-            loads_table = catalog.load_table(identifier)
+            return catalog.load_table(identifier)
 
-        expected_schema = schema_to_pyarrow(loads_table.schema())
-        casted_row = cast_table_safe(load_row, expected_schema, strict=False)
-        loads_table.append(casted_row)
+    def _load_record_exists(self, loads_table, load_id: str) -> bool:
+        """Check whether a load_id already exists in _dlt_loads."""
+        existing_rows = loads_table.scan(row_filter=EqualTo("load_id", load_id)).to_arrow()
+        return len(existing_rows) > 0
+
+    def _load_record_exists_in_catalog(self, catalog, identifier: str, load_id: str) -> bool:
+        """Best-effort catalog-level existence check for ambiguous write outcomes."""
+        try:
+            loads_table = catalog.load_table(identifier)
+            return self._load_record_exists(loads_table, load_id)
+        except Exception:
+            return False
 
     def _get_merge_strategy(self, table_schema: TTableSchema) -> str:
         """Extract merge strategy from table schema.
