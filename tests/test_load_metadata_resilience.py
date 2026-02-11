@@ -5,7 +5,7 @@ Tests for _dlt_loads metadata write resilience in class-based destination.
 from unittest.mock import Mock, patch
 
 import pyarrow as pa
-from pyiceberg.exceptions import CommitFailedException
+from pyiceberg.exceptions import CommitFailedException, NoSuchTableError
 
 from dlt.common.destination import DestinationCapabilitiesContext
 from dlt.common.schema import Schema
@@ -95,3 +95,37 @@ def test_store_completed_load_handles_ambiguous_append_outcome() -> None:
 
     assert loads_table.append.call_count == 1
     sleep_mock.assert_not_called()
+
+
+def test_get_or_create_loads_table_honors_custom_location_layout() -> None:
+    client = _make_client(max_retries=3)
+    client.config.table_location_layout = "custom_path/{namespace}/{table_name}"
+    client.config.warehouse = "file:///warehouse_root"
+
+    load_row = pa.table(
+        {
+            "load_id": ["load-1"],
+            "schema_name": ["test_schema"],
+            "status": [0],
+            "inserted_at": [None],
+            "schema_version_hash": ["abc"],
+        }
+    )
+    loads_table_name = client.schema.loads_table_name
+    identifier = f"{client.config.namespace}.{loads_table_name}"
+
+    catalog = Mock()
+    created_table = Mock()
+    catalog.load_table.side_effect = [NoSuchTableError("missing"), created_table]
+
+    with patch("dlt_iceberg.destination_client.convert_dlt_to_iceberg_schema", return_value=Mock()):
+        result = client._get_or_create_loads_table(
+            catalog=catalog,
+            identifier=identifier,
+            loads_table_name=loads_table_name,
+            load_row=load_row,
+        )
+
+    assert result is created_table
+    create_kwargs = catalog.create_table.call_args.kwargs
+    assert create_kwargs["location"] == "file:///warehouse_root/custom_path/test_ns/_dlt_loads"

@@ -654,10 +654,17 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables):
                 self.schema.get_table(loads_table_name),
                 load_row,
             )
+            create_kwargs = {
+                "identifier": identifier,
+                "schema": loads_schema,
+                "partition_spec": PartitionSpec(),
+            }
+            table_location = self._get_table_location(loads_table_name)
+            if table_location:
+                create_kwargs["location"] = table_location
+
             catalog.create_table(
-                identifier=identifier,
-                schema=loads_schema,
-                partition_spec=PartitionSpec(),
+                **create_kwargs
             )
             return catalog.load_table(identifier)
 
