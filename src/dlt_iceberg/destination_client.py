@@ -15,6 +15,7 @@ from types import TracebackType
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from dlt.common import pendulum
 from dlt.common.configuration import configspec
 from dlt.common.destination import DestinationCapabilitiesContext, Destination
 from dlt.common.destination.client import (
@@ -520,43 +521,82 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables):
         Called once by dlt after all individual file jobs complete successfully.
         Reads from module-level global state since dlt creates multiple client instances.
         """
+        pending_files: Dict[str, List[Tuple[TTableSchema, str, pa.Table]]] = {}
         with _PENDING_FILES_LOCK:
-            if load_id not in _PENDING_FILES or not _PENDING_FILES[load_id]:
-                logger.info(f"No files to commit for load {load_id}")
-                return
-
-            # Copy data and clear immediately (under lock)
-            pending_files = dict(_PENDING_FILES[load_id])
-            del _PENDING_FILES[load_id]
+            if load_id in _PENDING_FILES and _PENDING_FILES[load_id]:
+                # Copy data and clear immediately (under lock)
+                pending_files = dict(_PENDING_FILES[load_id])
+                del _PENDING_FILES[load_id]
 
         catalog = self._get_catalog()
         namespace = self.config.namespace
 
-        total_files = sum(len(files) for files in pending_files.values())
-        logger.info(
-            f"Committing {total_files} files across "
-            f"{len(pending_files)} tables for load {load_id}"
+        if pending_files:
+            total_files = sum(len(files) for files in pending_files.values())
+            logger.info(
+                f"Committing {total_files} files across "
+                f"{len(pending_files)} tables for load {load_id}"
+            )
+
+            # Process each table
+            for table_name, file_data in pending_files.items():
+                identifier = f"{namespace}.{table_name}"
+
+                try:
+                    self._commit_table_files(
+                        catalog=catalog,
+                        identifier=identifier,
+                        table_name=table_name,
+                        file_data=file_data,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to commit files for table {identifier}: {e}",
+                        exc_info=True,
+                    )
+                    raise
+        else:
+            logger.info(f"No files to commit for load {load_id}")
+
+        # dlt expects complete_load to persist a record in _dlt_loads.
+        # Without this, _dlt_loads is never materialized for this destination.
+        self._store_completed_load(catalog, load_id)
+        logger.info(f"Load {load_id} completed successfully")
+
+    def _store_completed_load(self, catalog, load_id: str) -> None:
+        """Persist a load completion row in the internal _dlt_loads table."""
+        loads_table_name = self.schema.loads_table_name
+        identifier = f"{self.config.namespace}.{loads_table_name}"
+
+        load_row = pa.table(
+            {
+                "load_id": [load_id],
+                "schema_name": [self.schema.name],
+                "status": [0],
+                "inserted_at": [pendulum.now()],
+                "schema_version_hash": [self.schema.version_hash],
+            }
         )
 
-        # Process each table
-        for table_name, file_data in pending_files.items():
-            identifier = f"{namespace}.{table_name}"
+        try:
+            loads_table = catalog.load_table(identifier)
+        except NoSuchTableError:
+            from pyiceberg.partitioning import PartitionSpec
 
-            try:
-                self._commit_table_files(
-                    catalog=catalog,
-                    identifier=identifier,
-                    table_name=table_name,
-                    file_data=file_data,
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to commit files for table {identifier}: {e}",
-                    exc_info=True,
-                )
-                raise
+            loads_schema = convert_dlt_to_iceberg_schema(
+                self.schema.get_table(loads_table_name),
+                load_row,
+            )
+            catalog.create_table(
+                identifier=identifier,
+                schema=loads_schema,
+                partition_spec=PartitionSpec(),
+            )
+            loads_table = catalog.load_table(identifier)
 
-        logger.info(f"Load {load_id} completed successfully")
+        expected_schema = schema_to_pyarrow(loads_table.schema())
+        casted_row = cast_table_safe(load_row, expected_schema, strict=False)
+        loads_table.append(casted_row)
 
     def _get_merge_strategy(self, table_schema: TTableSchema) -> str:
         """Extract merge strategy from table schema.

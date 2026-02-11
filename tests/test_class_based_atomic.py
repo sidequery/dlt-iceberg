@@ -293,5 +293,60 @@ def test_class_based_incremental():
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def test_class_based_creates_dlt_loads_table():
+    """Ensure complete_load persists load records in _dlt_loads."""
+    temp_dir = tempfile.mkdtemp()
+    warehouse_path = f"{temp_dir}/warehouse"
+    catalog_path = f"{temp_dir}/catalog.db"
+
+    try:
+        from dlt_iceberg import iceberg_rest
+        from pyiceberg.catalog import load_catalog
+
+        @dlt.resource(name="events", write_disposition="append")
+        def batch_1():
+            for i in range(1, 3):
+                yield {"event_id": i, "value": i * 10}
+
+        @dlt.resource(name="events", write_disposition="append")
+        def batch_2():
+            for i in range(3, 5):
+                yield {"event_id": i, "value": i * 10}
+
+        pipeline = dlt.pipeline(
+            pipeline_name="test_dlt_loads",
+            destination=iceberg_rest(
+                catalog_uri=f"sqlite:///{catalog_path}",
+                warehouse=f"file://{warehouse_path}",
+                namespace="test_ns",
+            ),
+            dataset_name="test_dataset",
+        )
+
+        load_info_1 = pipeline.run(batch_1())
+        load_info_2 = pipeline.run(batch_2())
+
+        assert not load_info_1.has_failed_jobs
+        assert not load_info_2.has_failed_jobs
+
+        expected_load_ids = {load_info_1.loads_ids[0], load_info_2.loads_ids[0]}
+
+        catalog = load_catalog(
+            "dlt_catalog",
+            type="sql",
+            uri=f"sqlite:///{catalog_path}",
+            warehouse=f"file://{warehouse_path}",
+        )
+        loads_table = catalog.load_table("test_ns._dlt_loads")
+        loads_rows = loads_table.scan().to_arrow()
+
+        assert len(loads_rows) == 2
+        assert set(loads_rows.column("load_id").to_pylist()) == expected_load_ids
+        assert set(loads_rows.column("status").to_pylist()) == {0}
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
