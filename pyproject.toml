@@ -1,6 +1,6 @@
 [project]
 name = "dlt-iceberg"
-version = "0.4.0"
+version = "0.4.1"
 description = "dlt destination for Apache Iceberg with atomic multi-file commits via REST catalogs"
 readme = "README.md"
 requires-python = ">=3.11"
