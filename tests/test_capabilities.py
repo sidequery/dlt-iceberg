@@ -269,6 +269,12 @@ class TestTableLocationLayout:
             assert "test_location" in location
             assert "events" in location
 
+            loads_table = catalog.load_table("test_location._dlt_loads")
+            loads_location = loads_table.location()
+            assert "custom_path" in loads_location
+            assert "test_location" in loads_location
+            assert "_dlt_loads" in loads_location
+
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

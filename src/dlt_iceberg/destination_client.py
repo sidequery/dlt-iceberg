@@ -15,6 +15,7 @@ from types import TracebackType
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from dlt.common import pendulum
 from dlt.common.configuration import configspec
 from dlt.common.destination import DestinationCapabilitiesContext, Destination
 from dlt.common.destination.client import (
@@ -36,6 +37,7 @@ from pyiceberg.exceptions import (
     NoSuchTableError,
     NoSuchNamespaceError,
 )
+from pyiceberg.expressions import EqualTo
 
 from .schema_converter import convert_dlt_to_iceberg_schema
 from .partition_builder import build_partition_spec
@@ -904,43 +906,164 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         Called once by dlt after all individual file jobs complete successfully.
         Reads from module-level global state since dlt creates multiple client instances.
         """
+        pending_files: Dict[str, List[Tuple[TTableSchema, str, pa.Table]]] = {}
         with _PENDING_FILES_LOCK:
-            if load_id not in _PENDING_FILES or not _PENDING_FILES[load_id]:
-                logger.info(f"No files to commit for load {load_id}")
-                return
-
-            # Copy data and clear immediately (under lock)
-            pending_files = dict(_PENDING_FILES[load_id])
-            del _PENDING_FILES[load_id]
+            if load_id in _PENDING_FILES and _PENDING_FILES[load_id]:
+                # Copy data and clear immediately (under lock)
+                pending_files = dict(_PENDING_FILES[load_id])
+                del _PENDING_FILES[load_id]
 
         catalog = self._get_catalog()
         namespace = self.config.namespace
 
-        total_files = sum(len(files) for files in pending_files.values())
-        logger.info(
-            f"Committing {total_files} files across "
-            f"{len(pending_files)} tables for load {load_id}"
+        if pending_files:
+            total_files = sum(len(files) for files in pending_files.values())
+            logger.info(
+                f"Committing {total_files} files across "
+                f"{len(pending_files)} tables for load {load_id}"
+            )
+
+            # Process each table
+            for table_name, file_data in pending_files.items():
+                identifier = f"{namespace}.{table_name}"
+
+                try:
+                    self._commit_table_files(
+                        catalog=catalog,
+                        identifier=identifier,
+                        table_name=table_name,
+                        file_data=file_data,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to commit files for table {identifier}: {e}",
+                        exc_info=True,
+                    )
+                    raise
+        else:
+            logger.info(f"No files to commit for load {load_id}")
+
+        # dlt expects complete_load to persist a record in _dlt_loads.
+        # Without this, _dlt_loads is never materialized for this destination.
+        self._store_completed_load(catalog, load_id)
+        logger.info(f"Load {load_id} completed successfully")
+
+    def _store_completed_load(self, catalog, load_id: str) -> None:
+        """Persist a load completion row in the internal _dlt_loads table."""
+        loads_table_name = self.schema.loads_table_name
+        identifier = f"{self.config.namespace}.{loads_table_name}"
+
+        load_row = pa.table(
+            {
+                "load_id": [load_id],
+                "schema_name": [self.schema.name],
+                "status": [0],
+                "inserted_at": [pendulum.now()],
+                "schema_version_hash": [self.schema.version_hash],
+            }
         )
 
-        # Process each table
-        for table_name, file_data in pending_files.items():
-            identifier = f"{namespace}.{table_name}"
-
+        for attempt in range(self.config.max_retries):
             try:
-                self._commit_table_files(
-                    catalog=catalog,
-                    identifier=identifier,
-                    table_name=table_name,
-                    file_data=file_data,
+                loads_table = self._get_or_create_loads_table(
+                    catalog, identifier, loads_table_name, load_row
                 )
-            except Exception as e:
-                logger.error(
-                    f"Failed to commit files for table {identifier}: {e}",
-                    exc_info=True,
-                )
-                raise
 
-        logger.info(f"Load {load_id} completed successfully")
+                # Idempotency: if this load_id was already recorded, do nothing.
+                if self._load_record_exists(loads_table, load_id):
+                    logger.info(f"Load {load_id} already recorded in {identifier}")
+                    return
+
+                expected_schema = schema_to_pyarrow(loads_table.schema())
+                casted_row = cast_table_safe(load_row, expected_schema, strict=False)
+                loads_table.append(casted_row)
+                return
+
+            except Exception as e:
+                retryable = is_retryable_error(e)
+
+                # Ambiguous write handling: append may have succeeded but client saw an error.
+                # Read-after-error: if record exists now, treat as success.
+                if self._load_record_exists_in_catalog(catalog, identifier, load_id):
+                    logger.warning(
+                        f"Encountered error while recording load {load_id} but record exists; "
+                        f"treating as success: {e}"
+                    )
+                    return
+
+                log_error_with_context(
+                    e,
+                    operation=f"record load in {identifier}",
+                    table_name=loads_table_name,
+                    attempt=attempt + 1,
+                    max_attempts=self.config.max_retries,
+                    include_traceback=not retryable,
+                )
+
+                if not retryable:
+                    error_msg = get_user_friendly_error_message(
+                        e, f"record load metadata in table {identifier}"
+                    )
+                    raise RuntimeError(error_msg) from e
+
+                if attempt >= self.config.max_retries - 1:
+                    error_msg = get_user_friendly_error_message(
+                        e,
+                        f"record load metadata in table {identifier} after "
+                        f"{self.config.max_retries} attempts",
+                    )
+                    raise RuntimeError(error_msg) from e
+
+                sleep_time = self.config.retry_backoff_base ** attempt
+                logger.info(
+                    f"Retrying load metadata write after {sleep_time}s "
+                    f"(attempt {attempt + 2}/{self.config.max_retries})"
+                )
+                time.sleep(sleep_time)
+
+    def _get_or_create_loads_table(
+        self,
+        catalog,
+        identifier: str,
+        loads_table_name: str,
+        load_row: pa.Table,
+    ):
+        """Load the internal _dlt_loads table, creating it if needed."""
+        try:
+            return catalog.load_table(identifier)
+        except NoSuchTableError:
+            from pyiceberg.partitioning import PartitionSpec
+
+            loads_schema = convert_dlt_to_iceberg_schema(
+                self.schema.get_table(loads_table_name),
+                load_row,
+            )
+            create_kwargs = {
+                "identifier": identifier,
+                "schema": loads_schema,
+                "partition_spec": PartitionSpec(),
+            }
+            table_location = self._get_table_location(loads_table_name)
+            if table_location:
+                create_kwargs["location"] = table_location
+
+            catalog.create_table(
+                **create_kwargs
+            )
+            return catalog.load_table(identifier)
+
+    def _load_record_exists(self, loads_table, load_id: str) -> bool:
+        """Check whether a load_id already exists in _dlt_loads."""
+        existing_rows = loads_table.scan(row_filter=EqualTo("load_id", load_id)).to_arrow()
+        return len(existing_rows) > 0
+
+    def _load_record_exists_in_catalog(self, catalog, identifier: str, load_id: str) -> bool:
+        """Best-effort catalog-level existence check for ambiguous write outcomes."""
+        try:
+            loads_table = catalog.load_table(identifier)
+            return self._load_record_exists(loads_table, load_id)
+        except Exception:
+            return False
 
     def _get_merge_strategy(self, table_schema: TTableSchema) -> str:
         """Extract merge strategy from table schema.
