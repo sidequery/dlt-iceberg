@@ -122,7 +122,7 @@ def test_cast_missing_column_filled_with_nulls():
     target_schema = pa.schema([
         pa.field("id", pa.int64()),
         pa.field("name", pa.string()),
-        pa.field("score", pa.float64()),
+        pa.field("score", pa.float64(), nullable=True),
     ])
 
     table = pa.table(
@@ -161,13 +161,13 @@ def test_cast_multiple_missing_columns_filled():
 
 
 def test_cast_missing_columns_work_in_strict_mode():
-    """Missing columns are warnings, not errors, so strict mode succeeds."""
+    """Missing nullable columns are warnings, not errors, so strict mode succeeds."""
     source_schema = pa.schema([
         pa.field("id", pa.int64()),
     ])
     target_schema = pa.schema([
         pa.field("id", pa.int64()),
-        pa.field("value", pa.int64()),
+        pa.field("value", pa.int64(), nullable=True),
     ])
 
     table = pa.table({"id": [10]}, schema=source_schema)
@@ -177,6 +177,44 @@ def test_cast_missing_columns_work_in_strict_mode():
     assert len(result) == 1
     assert result.schema == target_schema
     assert result.column("value").to_pylist() == [None]
+
+
+def test_cast_missing_required_column_fails_non_strict():
+    """Missing required columns are rejected instead of null-filled."""
+    source_schema = pa.schema([
+        pa.field("id", pa.int64(), nullable=False),
+    ])
+    target_schema = pa.schema([
+        pa.field("id", pa.int64(), nullable=False),
+        pa.field("value", pa.int64(), nullable=False),
+    ])
+
+    table = pa.table({"id": [10]}, schema=source_schema)
+
+    with pytest.raises(CastingError) as exc_info:
+        cast_table_safe(table, target_schema, strict=False)
+
+    assert "required field 'value'" in str(exc_info.value).lower()
+    assert "not in source schema" in str(exc_info.value).lower()
+
+
+def test_cast_missing_required_column_fails_strict_mode():
+    """Strict mode does not silently proceed for missing required columns."""
+    source_schema = pa.schema([
+        pa.field("id", pa.int64(), nullable=False),
+    ])
+    target_schema = pa.schema([
+        pa.field("id", pa.int64(), nullable=False),
+        pa.field("value", pa.int64(), nullable=False),
+    ])
+
+    table = pa.table({"id": [10]}, schema=source_schema)
+
+    with pytest.raises(CastingError) as exc_info:
+        cast_table_safe(table, target_schema, strict=True)
+
+    assert "required field 'value'" in str(exc_info.value).lower()
+    assert "not in source schema" in str(exc_info.value).lower()
 
 
 # ---------------------------------------------------------------------------

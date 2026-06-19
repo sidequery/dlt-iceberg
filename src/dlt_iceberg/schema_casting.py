@@ -12,6 +12,19 @@ import pyarrow as pa
 logger = logging.getLogger(__name__)
 
 
+def _missing_required_target_fields(
+    source_schema: pa.Schema,
+    target_schema: pa.Schema,
+) -> List[pa.Field]:
+    """Return non-nullable target fields that are absent from the source schema."""
+    source_field_names = {field.name for field in source_schema}
+    return [
+        target_field
+        for target_field in target_schema
+        if target_field.name not in source_field_names and not target_field.nullable
+    ]
+
+
 def ensure_iceberg_compatible_arrow_schema(schema: pa.Schema) -> pa.Schema:
     """
     Convert Arrow schema to Iceberg-compatible schema.
@@ -332,11 +345,17 @@ def validate_cast(
     source_field_names = {field.name for field in source_schema}
     for target_field in target_schema:
         if target_field.name not in source_field_names:
-            # Missing fields will be filled with nulls - this is usually OK
-            result.add_warning(
-                f"Field '{target_field.name}' exists in target but not in source "
-                f"(will be null)"
-            )
+            if target_field.nullable:
+                # Missing nullable fields will be filled with nulls.
+                result.add_warning(
+                    f"Field '{target_field.name}' exists in target but not in source "
+                    f"(will be null)"
+                )
+            else:
+                result.add_error(
+                    f"Required field '{target_field.name}' exists in target but not "
+                    f"in source schema"
+                )
 
     return result
 
@@ -417,6 +436,17 @@ def cast_table_safe(
     # Log warnings
     for warning in validation.warnings:
         logger.warning(f"Cast warning: {warning}")
+
+    missing_required_fields = _missing_required_target_fields(table.schema, target_schema)
+    if missing_required_fields:
+        error_msg = (
+            "Cannot cast table with missing required target fields:\n"
+            + "\n".join(
+                f"Required field '{field.name}' exists in target but not in source schema"
+                for field in missing_required_fields
+            )
+        )
+        raise CastingError(error_msg)
 
     # In strict mode, fail if there are errors
     if strict and not validation.is_safe():
