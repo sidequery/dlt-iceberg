@@ -866,7 +866,10 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         for name in table_names:
             identifier = f"{self.config.namespace}.{name}"
             try:
-                catalog.drop_table(identifier)
+                if hasattr(catalog, "purge_table"):
+                    catalog.purge_table(identifier)
+                else:
+                    catalog.drop_table(identifier)
                 logger.info(f"Dropped table {identifier}")
             except NoSuchTableError:
                 pass

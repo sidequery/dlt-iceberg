@@ -16,6 +16,9 @@ Covers:
 
 import tempfile
 import shutil
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import dlt
 from pyiceberg.catalog import load_catalog
 
@@ -35,6 +38,22 @@ def test_drop_tables_method_exists():
         "IcebergRestClient must implement drop_tables(*names, delete_schema=bool) "
         "for dlt refresh modes to work."
     )
+
+
+def test_drop_tables_prefers_purge_table_when_available():
+    """REST catalogs support purge_table, which removes table data and metadata
+    files instead of only unregistering the catalog entry."""
+    from dlt_iceberg.destination_client import IcebergRestClient
+
+    catalog = SimpleNamespace(purge_table=Mock(), drop_table=Mock())
+    client = object.__new__(IcebergRestClient)
+    client.config = SimpleNamespace(namespace="drop_ns")
+    client._get_catalog = Mock(return_value=catalog)
+
+    client.drop_tables("events", delete_schema=False)
+
+    catalog.purge_table.assert_called_once_with("drop_ns.events")
+    catalog.drop_table.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
