@@ -286,7 +286,9 @@ iceberg_partition.bucket(8, "user_id", "user_bucket")
 
 ### Using Column Hints
 
-You can also use dlt column hints for partitioning:
+Prefer `iceberg_adapter` for partitioning. If you need to set column hints
+directly, use the `x-partition` custom hints; raw `partition_transform` fields
+are rejected by dlt schema validation.
 
 ```python
 @dlt.resource(
@@ -294,13 +296,13 @@ You can also use dlt column hints for partitioning:
     columns={
         "event_date": {
             "data_type": "date",
-            "partition": True,
-            "partition_transform": "day",
+            "x-partition": True,
+            "x-partition-transform": "day",
         },
         "user_id": {
             "data_type": "bigint",
-            "partition": True,
-            "partition_transform": "bucket[10]",
+            "x-partition": True,
+            "x-partition-transform": "bucket[10]",
         }
     }
 )
