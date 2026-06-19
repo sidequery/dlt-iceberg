@@ -52,6 +52,7 @@ from .error_handling import (
     log_error_with_context,
     get_user_friendly_error_message,
 )
+from .merge_utils import build_primary_key_delete_filter
 from pyiceberg.io.pyarrow import schema_to_pyarrow
 
 logger = logging.getLogger(__name__)
@@ -1106,40 +1107,10 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         Returns:
             Tuple of (rows_deleted_estimate, rows_inserted, hard_deleted)
         """
-        from pyiceberg.expressions import In, And, EqualTo, Or
-
         # Build delete filter from primary key values in incoming data
-        if len(primary_keys) == 1:
-            pk_col = primary_keys[0]
-            pk_values = combined_table.column(pk_col).to_pylist()
-            # Deduplicate values
-            unique_pk_values = list(set(pk_values))
-            delete_filter = In(pk_col, unique_pk_values)
-            deleted_estimate = len(unique_pk_values)
-        else:
-            # Composite primary key - build OR of AND conditions
-            pk_tuples = set()
-            for i in range(len(combined_table)):
-                pk_tuple = tuple(
-                    combined_table.column(pk).to_pylist()[i] for pk in primary_keys
-                )
-                pk_tuples.add(pk_tuple)
-
-            conditions = []
-            for pk_tuple in pk_tuples:
-                and_conditions = [
-                    EqualTo(pk, val) for pk, val in zip(primary_keys, pk_tuple)
-                ]
-                if len(and_conditions) == 1:
-                    conditions.append(and_conditions[0])
-                else:
-                    conditions.append(And(*and_conditions))
-
-            if len(conditions) == 1:
-                delete_filter = conditions[0]
-            else:
-                delete_filter = Or(*conditions)
-            deleted_estimate = len(pk_tuples)
+        delete_filter, deleted_estimate = build_primary_key_delete_filter(
+            combined_table, primary_keys
+        )
 
         logger.info(
             f"Delete-insert for {identifier}: deleting up to {deleted_estimate} "
@@ -1181,7 +1152,6 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         if not hard_delete_col or hard_delete_col not in combined_table.column_names:
             return combined_table, None, 0
 
-        from pyiceberg.expressions import In, And, EqualTo, Or
         import pyarrow.compute as pc
 
         # Get the delete marker column
@@ -1196,34 +1166,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
             return rows_to_keep, None, 0
 
         # Build delete filter from primary keys of rows to delete
-        if len(primary_keys) == 1:
-            pk_col = primary_keys[0]
-            pk_values = rows_to_delete.column(pk_col).to_pylist()
-            unique_pk_values = list(set(pk_values))
-            delete_filter = In(pk_col, unique_pk_values)
-        else:
-            # Composite primary key
-            pk_tuples = set()
-            for i in range(len(rows_to_delete)):
-                pk_tuple = tuple(
-                    rows_to_delete.column(pk).to_pylist()[i] for pk in primary_keys
-                )
-                pk_tuples.add(pk_tuple)
-
-            conditions = []
-            for pk_tuple in pk_tuples:
-                and_conditions = [
-                    EqualTo(pk, val) for pk, val in zip(primary_keys, pk_tuple)
-                ]
-                if len(and_conditions) == 1:
-                    conditions.append(and_conditions[0])
-                else:
-                    conditions.append(And(*and_conditions))
-
-            if len(conditions) == 1:
-                delete_filter = conditions[0]
-            else:
-                delete_filter = Or(*conditions)
+        delete_filter, _ = build_primary_key_delete_filter(rows_to_delete, primary_keys)
 
         return rows_to_keep, delete_filter, len(rows_to_delete)
 
