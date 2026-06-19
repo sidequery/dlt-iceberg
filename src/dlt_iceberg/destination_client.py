@@ -855,6 +855,35 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         except NoSuchNamespaceError:
             pass  # Namespace doesn't exist
 
+    def drop_tables(self, *table_names: str, delete_schema: bool = True) -> None:
+        """Drop the named Iceberg tables and optionally wipe stored schema versions.
+
+        Implements the dlt JobClient drop_tables contract so that
+        refresh="drop_resources" / refresh="drop_sources" (dlt/load/utils.py)
+        invoke this path instead of warn-and-skip.
+        """
+        catalog = self._get_catalog()
+        for name in table_names:
+            identifier = f"{self.config.namespace}.{name}"
+            try:
+                if hasattr(catalog, "purge_table"):
+                    catalog.purge_table(identifier)
+                else:
+                    catalog.drop_table(identifier)
+                logger.info(f"Dropped table {identifier}")
+            except NoSuchTableError:
+                pass
+
+        if delete_schema:
+            version_identifier = (
+                f"{self.config.namespace}.{self.schema.version_table_name}"
+            )
+            try:
+                version_table = catalog.load_table(version_identifier)
+                version_table.delete(EqualTo("schema_name", self.schema.name))
+            except NoSuchTableError:
+                pass
+
     def create_load_job(
         self,
         table: PreparedTableSchema,
