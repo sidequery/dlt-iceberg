@@ -373,5 +373,45 @@ def test_schema_evolution_unit_compare():
     print("\n   All unit tests passed")
 
 
+def test_evolve_schema_rejects_missing_required_before_applying_changes():
+    """
+    Missing required existing columns are rejected before adding/promoting columns.
+    """
+    from dlt_iceberg.schema_evolution import (
+        evolve_schema_if_needed,
+        SchemaEvolutionError,
+    )
+
+    existing_schema = Schema(
+        NestedField(1, "id", IntegerType(), required=True),
+        NestedField(2, "name", StringType(), required=False),
+    )
+    incoming_schema = Schema(
+        NestedField(2, "name", StringType(), required=False),
+        NestedField(3, "new_col", StringType(), required=False),
+    )
+
+    class RejectingTable:
+        def __init__(self, schema):
+            self._schema = schema
+            self.update_schema_called = False
+
+        def schema(self):
+            return self._schema
+
+        def update_schema(self):
+            self.update_schema_called = True
+            raise AssertionError("schema evolution should not be applied")
+
+    table = RejectingTable(existing_schema)
+
+    with pytest.raises(SchemaEvolutionError) as exc_info:
+        evolve_schema_if_needed(table, incoming_schema, allow_column_drops=False)
+
+    assert "missing required existing columns" in str(exc_info.value).lower()
+    assert "id" in str(exc_info.value).lower()
+    assert not table.update_schema_called
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

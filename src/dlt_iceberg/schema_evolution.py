@@ -37,6 +37,19 @@ class SchemaEvolutionError(Exception):
     pass
 
 
+def _required_dropped_fields(
+    existing_schema: Schema,
+    dropped_fields: List[str],
+) -> List[str]:
+    """Return dropped existing fields that cannot be represented as sparse nulls."""
+    dropped_field_names = set(dropped_fields)
+    return [
+        field.name
+        for field in existing_schema.fields
+        if field.name in dropped_field_names and field.required
+    ]
+
+
 def can_promote_type(from_type: IcebergType, to_type: IcebergType) -> bool:
     """
     Check if one Iceberg type can be safely promoted to another.
@@ -239,6 +252,11 @@ def evolve_schema_if_needed(
     added_fields, type_changes, dropped_fields = compare_schemas(
         existing_schema, new_schema
     )
+    missing_required_fields = (
+        _required_dropped_fields(existing_schema, dropped_fields)
+        if not allow_column_drops
+        else []
+    )
 
     # Log what we found
     if added_fields:
@@ -248,6 +266,11 @@ def evolve_schema_if_needed(
     if dropped_fields:
         if allow_column_drops:
             logger.info(f"Detected {len(dropped_fields)} columns to drop: {dropped_fields}")
+        elif missing_required_fields:
+            logger.error(
+                f"Detected missing required columns in incoming data: "
+                f"{missing_required_fields}. Cannot fill required columns with nulls."
+            )
         else:
             logger.warning(
                 f"Detected {len(dropped_fields)} sparse columns (not in incoming data): "
@@ -258,6 +281,12 @@ def evolve_schema_if_needed(
     if not added_fields and not type_changes and not dropped_fields:
         logger.debug("No schema changes detected")
         return False
+
+    if missing_required_fields:
+        raise SchemaEvolutionError(
+            "Incoming data is missing required existing columns and cannot be "
+            "treated as sparse data: " + ", ".join(missing_required_fields)
+        )
 
     # Validate changes are safe
     validate_schema_changes(added_fields, type_changes, dropped_fields, allow_column_drops)
