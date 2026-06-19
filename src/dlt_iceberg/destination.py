@@ -32,6 +32,7 @@ from .error_handling import (
     log_error_with_context,
     get_user_friendly_error_message,
 )
+from .merge_utils import build_primary_key_delete_filter
 from pyiceberg.io.pyarrow import schema_to_pyarrow
 
 logger = logging.getLogger(__name__)
@@ -71,39 +72,10 @@ def _execute_delete_insert(iceberg_table, arrow_table, primary_keys: list, ident
     Returns:
         Tuple of (rows_deleted_estimate, rows_inserted)
     """
-    from pyiceberg.expressions import In, And, EqualTo, Or
-
     # Build delete filter from primary key values in incoming data
-    if len(primary_keys) == 1:
-        pk_col = primary_keys[0]
-        pk_values = arrow_table.column(pk_col).to_pylist()
-        unique_pk_values = list(set(pk_values))
-        delete_filter = In(pk_col, unique_pk_values)
-        deleted_estimate = len(unique_pk_values)
-    else:
-        # Composite primary key - build OR of AND conditions
-        pk_tuples = set()
-        for i in range(len(arrow_table)):
-            pk_tuple = tuple(
-                arrow_table.column(pk).to_pylist()[i] for pk in primary_keys
-            )
-            pk_tuples.add(pk_tuple)
-
-        conditions = []
-        for pk_tuple in pk_tuples:
-            and_conditions = [
-                EqualTo(pk, val) for pk, val in zip(primary_keys, pk_tuple)
-            ]
-            if len(and_conditions) == 1:
-                conditions.append(and_conditions[0])
-            else:
-                conditions.append(And(*and_conditions))
-
-        if len(conditions) == 1:
-            delete_filter = conditions[0]
-        else:
-            delete_filter = Or(*conditions)
-        deleted_estimate = len(pk_tuples)
+    delete_filter, deleted_estimate = build_primary_key_delete_filter(
+        arrow_table, primary_keys
+    )
 
     logger.info(
         f"Delete-insert for {identifier}: deleting up to {deleted_estimate} "
