@@ -280,13 +280,9 @@ def test_schema_evolution_unsafe_changes():
     assert "value" in dropped, "Should detect 'value' was dropped"
     print(f"   Detected dropped columns: {dropped}")
 
-    # Should raise error by default
-    try:
-        validate_schema_changes(added, type_changes, dropped, allow_column_drops=False)
-        assert False, "Should have raised SchemaEvolutionError for dropped column"
-    except SchemaEvolutionError as e:
-        assert "value" in str(e).lower() or "dropped" in str(e).lower()
-        print(f"   Correctly rejected: {str(e)}")
+    # Dropped columns should not raise - sparse data is handled by filling nulls
+    validate_schema_changes(added, type_changes, dropped, allow_column_drops=False)
+    print(f"   Sparse columns accepted (nulls will be filled at write time)")
 
     # Test 2: Unsafe type narrowing should be detected
     print("\nTest 2: Unsafe type narrowing detection")
@@ -375,6 +371,46 @@ def test_schema_evolution_unit_compare():
     print(f"   Dropped columns: {dropped}")
 
     print("\n   All unit tests passed")
+
+
+def test_evolve_schema_rejects_missing_required_before_applying_changes():
+    """
+    Missing required existing columns are rejected before adding/promoting columns.
+    """
+    from dlt_iceberg.schema_evolution import (
+        evolve_schema_if_needed,
+        SchemaEvolutionError,
+    )
+
+    existing_schema = Schema(
+        NestedField(1, "id", IntegerType(), required=True),
+        NestedField(2, "name", StringType(), required=False),
+    )
+    incoming_schema = Schema(
+        NestedField(2, "name", StringType(), required=False),
+        NestedField(3, "new_col", StringType(), required=False),
+    )
+
+    class RejectingTable:
+        def __init__(self, schema):
+            self._schema = schema
+            self.update_schema_called = False
+
+        def schema(self):
+            return self._schema
+
+        def update_schema(self):
+            self.update_schema_called = True
+            raise AssertionError("schema evolution should not be applied")
+
+    table = RejectingTable(existing_schema)
+
+    with pytest.raises(SchemaEvolutionError) as exc_info:
+        evolve_schema_if_needed(table, incoming_schema, allow_column_drops=False)
+
+    assert "missing required existing columns" in str(exc_info.value).lower()
+    assert "id" in str(exc_info.value).lower()
+    assert not table.update_schema_called
 
 
 if __name__ == "__main__":

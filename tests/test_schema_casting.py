@@ -370,6 +370,23 @@ def test_extra_field_in_target_warning():
     assert "not in source" in validation.warnings[0].lower()
 
 
+def test_required_extra_field_in_target_error():
+    """Test that missing required target fields are unsafe."""
+    source_schema = pa.schema([
+        pa.field("id", pa.int64(), nullable=False),
+    ])
+    target_schema = pa.schema([
+        pa.field("id", pa.int64(), nullable=False),
+        pa.field("name", pa.string(), nullable=False),
+    ])
+
+    validation = validate_cast(source_schema, target_schema)
+
+    assert not validation.is_safe()
+    assert any("required field 'name'" in err.lower() for err in validation.errors)
+    assert not validation.warnings
+
+
 def test_complex_multi_field_validation():
     """Test validation with multiple fields and mixed safety."""
     source_schema = pa.schema([
