@@ -64,6 +64,51 @@ logger = logging.getLogger(__name__)
 _PENDING_FILES: Dict[str, Dict[str, List[Tuple[TTableSchema, str, pa.Table]]]] = {}
 _PENDING_FILES_LOCK = threading.Lock()
 
+_INTERNAL_TIMESTAMP_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    "_dlt_pipeline_state": ("created_at",),
+    "_dlt_loads": ("inserted_at",),
+    "_dlt_version": ("inserted_at",),
+}
+
+
+def _normalize_internal_metadata_timestamps(
+    table_name: str,
+    arrow_table: pa.Table,
+    target_schema: Optional[pa.Schema] = None,
+) -> pa.Table:
+    """Keep dlt metadata timestamp batches aligned with their Iceberg table."""
+    timestamp_columns = _INTERNAL_TIMESTAMP_COLUMNS.get(table_name)
+    if not timestamp_columns:
+        return arrow_table
+
+    target_fields = {field.name: field for field in target_schema} if target_schema else {}
+    changed = False
+    fields = []
+    for field in arrow_table.schema:
+        if (
+            field.name not in timestamp_columns
+            or not pa.types.is_timestamp(field.type)
+        ):
+            fields.append(field)
+            continue
+
+        target_field = target_fields.get(field.name)
+        if target_field is not None and pa.types.is_timestamp(target_field.type):
+            target_type = target_field.type
+        else:
+            target_type = pa.timestamp("us")
+
+        if field.type != target_type:
+            fields.append(pa.field(field.name, target_type, nullable=field.nullable))
+            changed = True
+        else:
+            fields.append(field)
+
+    if not changed:
+        return arrow_table
+
+    return arrow_table.cast(pa.schema(fields, metadata=arrow_table.schema.metadata))
+
 
 @configspec
 class IcebergRestConfiguration(DestinationClientConfiguration):
@@ -983,14 +1028,23 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         loads_table_name = self.schema.loads_table_name
         identifier = f"{self.config.namespace}.{loads_table_name}"
 
+        inserted_at = pendulum.now("UTC").naive()
+        load_row_schema = pa.schema([
+            pa.field("load_id", pa.string(), nullable=False),
+            pa.field("schema_name", pa.string(), nullable=True),
+            pa.field("status", pa.int64(), nullable=False),
+            pa.field("inserted_at", pa.timestamp("us"), nullable=True),
+            pa.field("schema_version_hash", pa.string(), nullable=True),
+        ])
         load_row = pa.table(
             {
                 "load_id": [load_id],
                 "schema_name": [self.schema.name],
                 "status": [0],
-                "inserted_at": [pendulum.now()],
+                "inserted_at": [inserted_at],
                 "schema_version_hash": [self.schema.version_hash],
-            }
+            },
+            schema=load_row_schema,
         )
 
         for attempt in range(self.config.max_retries):
@@ -1232,11 +1286,25 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
                 except NoSuchTableError:
                     logger.info(f"Table {identifier} does not exist, will create")
 
+                target_schema = schema_to_pyarrow(iceberg_table.schema()) if table_exists else None
+                commit_file_data = [
+                    (
+                        table_schema,
+                        file_path,
+                        _normalize_internal_metadata_timestamps(
+                            table_name,
+                            arrow_table,
+                            target_schema=target_schema,
+                        ),
+                    )
+                    for table_schema, file_path, arrow_table in file_data
+                ]
+
                 # Create table if needed
                 if not table_exists:
                     # Use first file's Arrow table to generate schema
                     # Apply Iceberg compatibility first so schema uses compatible types
-                    first_arrow_table = ensure_iceberg_compatible_arrow_data(file_data[0][2])
+                    first_arrow_table = ensure_iceberg_compatible_arrow_data(commit_file_data[0][2])
                     iceberg_schema = convert_dlt_to_iceberg_schema(
                         table_schema, first_arrow_table
                     )
@@ -1265,7 +1333,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
                     logger.info(f"Created table {identifier} at {iceberg_table.location()}")
                 else:
                     # Table exists - check if schema evolution is needed
-                    first_arrow_table = ensure_iceberg_compatible_arrow_data(file_data[0][2])
+                    first_arrow_table = ensure_iceberg_compatible_arrow_data(commit_file_data[0][2])
                     incoming_schema = convert_dlt_to_iceberg_schema(
                         table_schema, first_arrow_table
                     )
@@ -1285,7 +1353,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
                 # Combine all Arrow tables and cast to match Iceberg schema
                 combined_tables = []
 
-                for _, file_path, arrow_table in file_data:
+                for _, file_path, arrow_table in commit_file_data:
                     # Cast to match Iceberg schema
                     # (compatibility conversions already applied when schema was created)
                     casted_table = cast_table_safe(

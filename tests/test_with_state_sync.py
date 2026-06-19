@@ -13,9 +13,10 @@ from datetime import datetime
 import pyarrow as pa
 from pyiceberg.catalog import load_catalog
 from pyiceberg.schema import Schema as IcebergSchema
-from pyiceberg.types import NestedField, StringType, LongType, TimestampType
+from pyiceberg.types import NestedField, StringType, LongType, TimestampType, TimestamptzType
 
 import dlt
+from dlt.common import pendulum
 from dlt_iceberg import iceberg_rest
 
 
@@ -308,6 +309,140 @@ class TestWithStateSyncMethods:
         result_none = client.get_stored_state("other_pipeline")
         assert result_none is None, "Should return None for non-existent pipeline"
         print("   Correctly returned None for non-existent pipeline")
+
+    def test_state_table_created_at_timestamptz_batch_matches_existing_timestamp_schema(
+        self, catalog_setup, client
+    ):
+        """State metadata keeps created_at as Iceberg timestamp across runs."""
+        catalog = catalog_setup["catalog"]
+
+        iceberg_schema = IcebergSchema(
+            NestedField(1, "version", LongType(), required=True),
+            NestedField(2, "engine_version", LongType(), required=True),
+            NestedField(3, "pipeline_name", StringType(), required=True),
+            NestedField(4, "state", StringType(), required=True),
+            NestedField(5, "created_at", TimestampType(), required=True),
+            NestedField(6, "version_hash", StringType(), required=False),
+            NestedField(7, "_dlt_load_id", StringType(), required=False),
+        )
+        catalog.create_table(
+            identifier="test._dlt_pipeline_state",
+            schema=iceberg_schema,
+        )
+
+        aware_arrow_schema = pa.schema([
+            pa.field("version", pa.int64(), nullable=False),
+            pa.field("engine_version", pa.int64(), nullable=False),
+            pa.field("pipeline_name", pa.string(), nullable=False),
+            pa.field("state", pa.string(), nullable=False),
+            pa.field("created_at", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("version_hash", pa.string(), nullable=True),
+            pa.field("_dlt_load_id", pa.string(), nullable=True),
+        ])
+        aware_state_batch = pa.table({
+            "version": [1],
+            "engine_version": [1],
+            "pipeline_name": ["my_pipeline"],
+            "state": ['{"state": true}'],
+            "created_at": [pendulum.datetime(2024, 1, 1, 12, 0, 0, tz="UTC")],
+            "version_hash": ["hash1"],
+            "_dlt_load_id": ["load1"],
+        }, schema=aware_arrow_schema)
+        state_table_schema = {
+            "name": "_dlt_pipeline_state",
+            "write_disposition": "append",
+            "columns": {
+                "version": {"data_type": "bigint", "nullable": False},
+                "engine_version": {"data_type": "bigint", "nullable": False},
+                "pipeline_name": {"data_type": "text", "nullable": False},
+                "state": {"data_type": "text", "nullable": False},
+                "created_at": {"data_type": "timestamp", "nullable": False},
+                "version_hash": {"data_type": "text", "nullable": True},
+                "_dlt_load_id": {"data_type": "text", "nullable": True},
+            },
+        }
+
+        client._commit_table_files(
+            catalog=catalog,
+            identifier="test._dlt_pipeline_state",
+            table_name="_dlt_pipeline_state",
+            file_data=[(state_table_schema, "state.parquet", aware_state_batch)],
+        )
+
+        state_table = catalog.load_table("test._dlt_pipeline_state")
+        created_at_field = state_table.schema().find_field("created_at")
+        assert isinstance(created_at_field.field_type, TimestampType)
+
+        stored_rows = state_table.scan().to_arrow()
+        assert stored_rows.column("created_at").type == pa.timestamp("us")
+        assert len(stored_rows) == 1
+
+    def test_state_table_created_at_preserves_existing_timestamptz_schema(
+        self, catalog_setup, client
+    ):
+        """State metadata does not downgrade existing timestamptz tables."""
+        catalog = catalog_setup["catalog"]
+
+        iceberg_schema = IcebergSchema(
+            NestedField(1, "version", LongType(), required=True),
+            NestedField(2, "engine_version", LongType(), required=True),
+            NestedField(3, "pipeline_name", StringType(), required=True),
+            NestedField(4, "state", StringType(), required=True),
+            NestedField(5, "created_at", TimestamptzType(), required=True),
+            NestedField(6, "version_hash", StringType(), required=False),
+            NestedField(7, "_dlt_load_id", StringType(), required=False),
+        )
+        catalog.create_table(
+            identifier="test._dlt_pipeline_state_tz",
+            schema=iceberg_schema,
+        )
+
+        aware_arrow_schema = pa.schema([
+            pa.field("version", pa.int64(), nullable=False),
+            pa.field("engine_version", pa.int64(), nullable=False),
+            pa.field("pipeline_name", pa.string(), nullable=False),
+            pa.field("state", pa.string(), nullable=False),
+            pa.field("created_at", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("version_hash", pa.string(), nullable=True),
+            pa.field("_dlt_load_id", pa.string(), nullable=True),
+        ])
+        aware_state_batch = pa.table({
+            "version": [1],
+            "engine_version": [1],
+            "pipeline_name": ["my_pipeline"],
+            "state": ['{"state": true}'],
+            "created_at": [pendulum.datetime(2024, 1, 1, 12, 0, 0, tz="UTC")],
+            "version_hash": ["hash1"],
+            "_dlt_load_id": ["load1"],
+        }, schema=aware_arrow_schema)
+        state_table_schema = {
+            "name": "_dlt_pipeline_state",
+            "write_disposition": "append",
+            "columns": {
+                "version": {"data_type": "bigint", "nullable": False},
+                "engine_version": {"data_type": "bigint", "nullable": False},
+                "pipeline_name": {"data_type": "text", "nullable": False},
+                "state": {"data_type": "text", "nullable": False},
+                "created_at": {"data_type": "timestamp", "nullable": False},
+                "version_hash": {"data_type": "text", "nullable": True},
+                "_dlt_load_id": {"data_type": "text", "nullable": True},
+            },
+        }
+
+        client._commit_table_files(
+            catalog=catalog,
+            identifier="test._dlt_pipeline_state_tz",
+            table_name="_dlt_pipeline_state",
+            file_data=[(state_table_schema, "state.parquet", aware_state_batch)],
+        )
+
+        state_table = catalog.load_table("test._dlt_pipeline_state_tz")
+        created_at_field = state_table.schema().find_field("created_at")
+        assert isinstance(created_at_field.field_type, TimestamptzType)
+
+        stored_rows = state_table.scan().to_arrow()
+        assert stored_rows.column("created_at").type == pa.timestamp("us", tz="UTC")
+        assert len(stored_rows) == 1
 
     def test_derive_schema_from_iceberg_tables(self, catalog_setup, client):
         """Test that schema can be derived from existing Iceberg tables."""
