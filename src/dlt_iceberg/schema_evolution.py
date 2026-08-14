@@ -138,6 +138,21 @@ def compare_schemas(
     return added_fields, type_changes, list(dropped_names)
 
 
+def _find_doc_updates(
+    existing_schema: Schema,
+    new_schema: Schema,
+) -> List[Tuple[str, str]]:
+    """Return non-null incoming field docs that differ from stored docs."""
+    existing_fields = {field.name: field for field in existing_schema.fields}
+    return [
+        (field.name, field.doc)
+        for field in new_schema.fields
+        if field.name in existing_fields
+        and field.doc is not None
+        and field.doc != existing_fields[field.name].doc
+    ]
+
+
 def validate_schema_changes(
     added_fields: List[NestedField],
     type_changes: List[Tuple[str, IcebergType, IcebergType]],
@@ -177,6 +192,7 @@ def apply_schema_evolution(
     added_fields: List[NestedField],
     type_changes: List[Tuple[str, IcebergType, IcebergType]],
     dropped_fields: Optional[List[str]] = None,
+    doc_updates: Optional[List[Tuple[str, str]]] = None,
 ) -> None:
     """
     Apply schema evolution changes to an Iceberg table.
@@ -186,15 +202,17 @@ def apply_schema_evolution(
         added_fields: New fields to add
         type_changes: Type promotions to apply
         dropped_fields: Fields to remove from the schema
+        doc_updates: Non-null column documentation updates to apply
     """
-    if not added_fields and not type_changes and not dropped_fields:
+    if not added_fields and not type_changes and not dropped_fields and not doc_updates:
         logger.info("No schema changes to apply")
         return
 
     logger.info(
         f"Applying schema evolution: "
         f"{len(added_fields)} new columns, {len(type_changes)} type promotions, "
-        f"{len(dropped_fields or [])} dropped columns"
+        f"{len(dropped_fields or [])} dropped columns, "
+        f"{len(doc_updates or [])} documentation updates"
     )
 
     # Apply changes using update_schema transaction
@@ -216,6 +234,11 @@ def apply_schema_evolution(
                 path=field_name,
                 field_type=new_type
             )
+
+        # Apply documentation updates only when an incoming doc was provided.
+        for field_name, doc in (doc_updates or []):
+            logger.info(f"  Updating documentation for column: {field_name}")
+            update.update_column(path=field_name, doc=doc)
 
         # Delete dropped columns
         for field_name in (dropped_fields or []):
@@ -252,6 +275,7 @@ def evolve_schema_if_needed(
     added_fields, type_changes, dropped_fields = compare_schemas(
         existing_schema, new_schema
     )
+    doc_updates = _find_doc_updates(existing_schema, new_schema)
     missing_required_fields = (
         _required_dropped_fields(existing_schema, dropped_fields)
         if not allow_column_drops
@@ -263,6 +287,8 @@ def evolve_schema_if_needed(
         logger.info(f"Detected {len(added_fields)} new columns: {[f.name for f in added_fields]}")
     if type_changes:
         logger.info(f"Detected {len(type_changes)} type changes: {[(name, str(old), str(new)) for name, old, new in type_changes]}")
+    if doc_updates:
+        logger.info(f"Detected documentation updates for columns: {[name for name, _ in doc_updates]}")
     if dropped_fields:
         if allow_column_drops:
             logger.info(f"Detected {len(dropped_fields)} columns to drop: {dropped_fields}")
@@ -278,7 +304,7 @@ def evolve_schema_if_needed(
             )
 
     # If no changes, nothing to do
-    if not added_fields and not type_changes and not dropped_fields:
+    if not added_fields and not type_changes and not dropped_fields and not doc_updates:
         logger.debug("No schema changes detected")
         return False
 
@@ -293,13 +319,14 @@ def evolve_schema_if_needed(
 
     # When allow_column_drops=False and only dropped fields were detected,
     # the table schema is already correct — no evolution needed.
-    if not allow_column_drops and not added_fields and not type_changes:
+    if not allow_column_drops and not added_fields and not type_changes and not doc_updates:
         return False
 
     # Apply evolution, passing dropped_fields only when allow_column_drops=True
     apply_schema_evolution(
         table, added_fields, type_changes,
         dropped_fields=dropped_fields if allow_column_drops else None,
+        doc_updates=doc_updates,
     )
 
     return True

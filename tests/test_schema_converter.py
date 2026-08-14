@@ -37,7 +37,11 @@ def test_convert_dlt_to_iceberg_schema():
         "name": "test_table",
         "columns": {
             "id": {"data_type": "bigint", "nullable": False},
-            "name": {"data_type": "text", "nullable": True},
+            "name": {
+                "data_type": "text",
+                "nullable": True,
+                "description": "Display name for the account",
+            },
             "active": {"data_type": "bool", "nullable": True},
             "created_at": {"data_type": "timestamp", "nullable": False},
         },
@@ -77,9 +81,11 @@ def test_convert_dlt_to_iceberg_schema():
     name_field = [f for f in iceberg_schema.fields if f.name == "name"][0]
     assert isinstance(name_field.field_type, StringType)
     assert not name_field.required  # Nullable
+    assert name_field.doc == "Display name for the account"
 
     active_field = [f for f in iceberg_schema.fields if f.name == "active"][0]
     assert isinstance(active_field.field_type, BooleanType)
+    assert active_field.doc is None
 
     created_field = [f for f in iceberg_schema.fields if f.name == "created_at"][0]
     assert isinstance(created_field.field_type, TimestampType)

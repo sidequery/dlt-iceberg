@@ -72,6 +72,7 @@ def convert_dlt_to_iceberg_schema(
             name=col_name,
             field_type=iceberg_type,
             required=required,
+            doc=dlt_col.get("description"),
         )
         fields.append(field)
         field_id += 1

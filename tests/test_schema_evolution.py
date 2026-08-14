@@ -413,5 +413,112 @@ def test_evolve_schema_rejects_missing_required_before_applying_changes():
     assert not table.update_schema_called
 
 
+class RecordingSchemaUpdate:
+    def __init__(self):
+        self.added_columns = []
+        self.updated_columns = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def add_column(self, **kwargs):
+        self.added_columns.append(kwargs)
+
+    def update_column(self, **kwargs):
+        self.updated_columns.append(kwargs)
+
+    def delete_column(self, path):
+        raise AssertionError("no column should be deleted")
+
+
+class RecordingTable:
+    def __init__(self, schema):
+        self._schema = schema
+        self.schema_update = RecordingSchemaUpdate()
+        self.update_schema_calls = 0
+
+    def schema(self):
+        return self._schema
+
+    def update_schema(self):
+        self.update_schema_calls += 1
+        return self.schema_update
+
+
+def test_evolve_schema_updates_non_null_changed_doc():
+    """A changed incoming description updates the existing Iceberg field doc."""
+    from dlt_iceberg.schema_evolution import evolve_schema_if_needed
+
+    table = RecordingTable(
+        Schema(NestedField(1, "name", StringType(), required=False, doc="Old comment"))
+    )
+    incoming_schema = Schema(
+        NestedField(1, "name", StringType(), required=False, doc="New comment")
+    )
+
+    assert evolve_schema_if_needed(table, incoming_schema)
+    assert table.update_schema_calls == 1
+    assert table.schema_update.updated_columns == [
+        {"path": "name", "doc": "New comment"}
+    ]
+
+
+def test_evolve_schema_adds_column_with_doc():
+    """A documented incoming column keeps its doc when added to Iceberg."""
+    from dlt_iceberg.schema_evolution import evolve_schema_if_needed
+
+    table = RecordingTable(
+        Schema(NestedField(1, "id", LongType(), required=True))
+    )
+    incoming_schema = Schema(
+        NestedField(1, "id", LongType(), required=True),
+        NestedField(
+            2,
+            "name",
+            StringType(),
+            required=False,
+            doc="Display name for the account",
+        ),
+    )
+
+    assert evolve_schema_if_needed(table, incoming_schema)
+    assert table.schema_update.added_columns == [
+        {
+            "path": "name",
+            "field_type": StringType(),
+            "required": False,
+            "doc": "Display name for the account",
+        }
+    ]
+
+
+@pytest.mark.parametrize("incoming_doc", [None, "Existing comment"])
+def test_evolve_schema_preserves_doc_without_changed_description(incoming_doc):
+    """Missing or unchanged descriptions do not overwrite an Iceberg field doc."""
+    from dlt_iceberg.schema_evolution import evolve_schema_if_needed
+
+    table = RecordingTable(
+        Schema(
+            NestedField(
+                1,
+                "name",
+                StringType(),
+                required=False,
+                doc="Existing comment",
+            )
+        )
+    )
+    incoming_schema = Schema(
+        NestedField(1, "name", StringType(), required=False, doc=incoming_doc)
+    )
+
+    assert not evolve_schema_if_needed(table, incoming_schema)
+    assert table.update_schema_calls == 0
+    assert table.schema_update.updated_columns == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
