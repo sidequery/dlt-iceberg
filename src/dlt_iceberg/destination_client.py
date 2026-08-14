@@ -5,7 +5,6 @@ This implementation uses dlt's JobClientBase interface to provide full lifecycle
 hooks, enabling atomic commits of multiple files per table.
 """
 
-import logging
 import time
 import threading
 from collections import defaultdict
@@ -15,7 +14,7 @@ from types import TracebackType
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from dlt.common import pendulum
+from dlt.common import logger, pendulum
 from dlt.common.configuration import configspec
 from dlt.common.destination import DestinationCapabilitiesContext, Destination
 from dlt.common.destination.client import (
@@ -54,9 +53,6 @@ from .error_handling import (
 )
 from .merge_utils import build_primary_key_delete_filter
 from pyiceberg.io.pyarrow import schema_to_pyarrow
-
-logger = logging.getLogger(__name__)
-
 
 # MODULE-LEVEL STATE: Accumulate files across client instances
 # Key: load_id, Value: {table_name: [(table_schema, file_path, arrow_table), ...]}
@@ -1037,10 +1033,11 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
                         table_name=table_name,
                         file_data=file_data,
                     )
-                except Exception as e:
-                    logger.error(
-                        f"Failed to commit files for table {identifier}: {e}",
-                        exc_info=True,
+                except Exception:
+                    # Use dlt's configured logger so failures raised from the
+                    # complete_load hook are visible in normal pipeline logs.
+                    logger.exception(
+                        f"Failed to commit files for table {identifier}"
                     )
                     raise
         else:

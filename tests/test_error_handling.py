@@ -217,6 +217,39 @@ class TestDestinationErrorHandling:
         pq.write_table(data, str(parquet_path))
         return str(parquet_path)
 
+    def test_complete_load_logs_commit_exception_with_dlt_logger(self):
+        """Failures in dlt's completion hook must be visible in pipeline logs."""
+        from dlt_iceberg import destination_client
+        from dlt_iceberg.destination_client import IcebergRestClient
+
+        load_id = "failed-load"
+        destination_client._PENDING_FILES[load_id] = {
+            "events": [
+                (
+                    {"name": "events", "write_disposition": "merge"},
+                    "events.parquet",
+                    pa.table({"id": [1]}),
+                )
+            ]
+        }
+        client = MagicMock()
+        client.config.namespace = "analytics"
+        client._get_catalog.return_value = MagicMock()
+        client._table_identifier.return_value = "analytics.events"
+        failure = RuntimeError("upsert exploded")
+        client._commit_table_files.side_effect = failure
+
+        try:
+            with patch.object(destination_client.logger, "exception") as log_exception:
+                with pytest.raises(RuntimeError, match="upsert exploded"):
+                    IcebergRestClient.complete_load(client, load_id)
+
+            log_exception.assert_called_once_with(
+                "Failed to commit files for table analytics.events"
+            )
+        finally:
+            destination_client._PENDING_FILES.pop(load_id, None)
+
     def test_non_retryable_error_fails_immediately(self):
         """Test that non-retryable errors fail without retrying."""
         from dlt_iceberg.destination import _iceberg_rest_handler
