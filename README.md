@@ -125,8 +125,14 @@ iceberg_rest(
     table_location_layout=None,  # Custom table location pattern
     register_new_tables=False,   # Register tables found in storage
     hard_delete_column="_dlt_deleted_at",  # Column for hard deletes
+    internal_table_prefix="_dlt",  # Physical prefix for dlt metadata tables
 )
 ```
+
+`internal_table_prefix` is opt-in and does not change dlt's logical schema.
+Leave the default to create the standard `_dlt_loads`, `_dlt_version`, and
+`_dlt_pipeline_state` tables. Set it to `"dlt"` for catalogs such as AWS S3
+Tables that reject identifiers beginning with an underscore.
 
 </details>
 

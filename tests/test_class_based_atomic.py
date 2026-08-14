@@ -348,5 +348,58 @@ def test_class_based_creates_dlt_loads_table():
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def test_internal_table_prefix_remaps_only_physical_metadata_tables():
+    """Keep dlt's logical names while supporting restrictive catalogs."""
+    temp_dir = tempfile.mkdtemp()
+    warehouse_path = f"{temp_dir}/warehouse"
+    catalog_path = f"{temp_dir}/catalog.db"
+
+    try:
+        from dlt_iceberg import iceberg_rest
+        from pyiceberg.catalog import load_catalog
+
+        @dlt.resource(name="events", write_disposition="append")
+        def events():
+            yield {"event_id": 1, "value": 10}
+
+        pipeline = dlt.pipeline(
+            pipeline_name="test_internal_table_prefix",
+            destination=iceberg_rest(
+                catalog_uri=f"sqlite:///{catalog_path}",
+                warehouse=f"file://{warehouse_path}",
+                namespace="test_ns",
+                internal_table_prefix="dlt",
+            ),
+            dataset_name="test_dataset",
+        )
+
+        first_load = pipeline.run(events())
+        second_load = pipeline.run(events())
+
+        assert not first_load.has_failed_jobs
+        assert not second_load.has_failed_jobs
+
+        catalog = load_catalog(
+            "dlt_catalog",
+            type="sql",
+            uri=f"sqlite:///{catalog_path}",
+            warehouse=f"file://{warehouse_path}",
+        )
+        table_names = {name for _, name in catalog.list_tables("test_ns")}
+
+        assert "events" in table_names
+        assert {"dlt_loads", "dlt_version"} <= table_names
+        assert not any(name.startswith("_dlt_") for name in table_names)
+        assert len(catalog.load_table("test_ns.dlt_loads").scan().to_arrow()) == 2
+
+        with pipeline.destination_client() as client:
+            assert (
+                client._physical_table_name(client.schema.state_table_name)
+                == "dlt_pipeline_state"
+            )
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
