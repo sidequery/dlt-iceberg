@@ -166,6 +166,12 @@ class IcebergRestConfiguration(DestinationClientConfiguration):
     # Set to None to disable hard delete
     hard_delete_column: Optional[str] = "_dlt_deleted_at"
 
+    # Physical prefix for dlt's internal metadata tables. The default preserves
+    # dlt's canonical names (_dlt_loads, _dlt_version, _dlt_pipeline_state).
+    # Catalogs that reject leading underscores, such as AWS S3 Tables, can set
+    # this to "dlt" without changing the logical names used by dlt.
+    internal_table_prefix: str = "_dlt"
+
 
 
 class IcebergRestLoadJob(RunnableLoadJob):
@@ -238,6 +244,27 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         # SQL client instance (created lazily)
         self._sql_client = None
 
+    def _physical_table_name(self, table_name: str) -> str:
+        """Map canonical dlt metadata names to their configured physical names."""
+        logical_prefix = "_dlt_"
+        if not table_name.startswith(logical_prefix):
+            return table_name
+
+        prefix = self.config.internal_table_prefix.rstrip("_")
+        if not prefix:
+            raise ValueError("internal_table_prefix must contain at least one character")
+        return f"{prefix}_{table_name.removeprefix(logical_prefix)}"
+
+    def _table_identifier(self, table_name: str) -> str:
+        return f"{self.config.namespace}.{self._physical_table_name(table_name)}"
+
+    def _is_internal_physical_table(self, table_name: str) -> bool:
+        return table_name in {
+            self._physical_table_name(self.schema.loads_table_name),
+            self._physical_table_name(self.schema.version_table_name),
+            self._physical_table_name(self.schema.state_table_name),
+        }
+
     # ---- WithSqlClient interface ----
 
     @property
@@ -273,7 +300,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         # Try to get location from catalog
         try:
             catalog = self._get_catalog()
-            identifier = f"{self.config.namespace}.{table_name}"
+            identifier = self._table_identifier(table_name)
             iceberg_table = catalog.load_table(identifier)
             return iceberg_table.location()
         except NoSuchTableError:
@@ -285,7 +312,10 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
             warehouse = self.config.warehouse or ""
             if warehouse and not warehouse.endswith("/"):
                 warehouse += "/"
-            return f"{warehouse}{self.config.namespace}/{table_name}"
+            return (
+                f"{warehouse}{self.config.namespace}/"
+                f"{self._physical_table_name(table_name)}"
+            )
 
     def load_open_table(self, table_format: TTableFormat, table_name: str, **kwargs: Any) -> Any:
         """Load and return a PyIceberg Table object."""
@@ -295,7 +325,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         from dlt.common.destination.exceptions import DestinationUndefinedEntity
 
         catalog = self._get_catalog()
-        identifier = f"{self.config.namespace}.{table_name}"
+        identifier = self._table_identifier(table_name)
 
         try:
             return catalog.load_table(identifier)
@@ -313,7 +343,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         """Get newest schema version by schema name using predicate pushdown."""
         try:
             catalog = self._get_catalog()
-            identifier = f"{self.config.namespace}.{self.schema.version_table_name}"
+            identifier = self._table_identifier(self.schema.version_table_name)
             iceberg_table = catalog.load_table(identifier)
 
             # Use row_filter for predicate pushdown - only scan matching rows
@@ -346,7 +376,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         """Get schema by exact version hash using predicate pushdown."""
         try:
             catalog = self._get_catalog()
-            identifier = f"{self.config.namespace}.{self.schema.version_table_name}"
+            identifier = self._table_identifier(self.schema.version_table_name)
             iceberg_table = catalog.load_table(identifier)
 
             # Use row_filter for predicate pushdown
@@ -394,7 +424,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         """Loads pipeline state from the _dlt_pipeline_state table using predicate pushdown."""
         try:
             catalog = self._get_catalog()
-            identifier = f"{self.config.namespace}.{self.schema.state_table_name}"
+            identifier = self._table_identifier(self.schema.state_table_name)
             iceberg_table = catalog.load_table(identifier)
 
             # Use row_filter for predicate pushdown
@@ -460,7 +490,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
             derived_tables = {}
             for table_id in tables:
                 table_name = table_id[1]
-                if table_name.startswith('_dlt_'):
+                if self._is_internal_physical_table(table_name):
                     continue  # Skip dlt metadata tables
 
                 try:
@@ -612,7 +642,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
 
         catalog = self._get_catalog()
         version_table_name = self.schema.version_table_name
-        identifier = f"{self.config.namespace}.{version_table_name}"
+        identifier = self._table_identifier(version_table_name)
 
         # Schema data to write
         # Use naive datetime (no timezone) to match Iceberg TimestampType
@@ -753,7 +783,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         location = self.config.table_location_layout.format(
             namespace=self.config.namespace,
             dataset_name=self.config.namespace,  # In dlt, dataset_name maps to namespace
-            table_name=table_name,
+            table_name=self._physical_table_name(table_name),
         )
 
         # If layout is relative (doesn't start with protocol), prepend warehouse
@@ -837,7 +867,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
             latest_metadata = os.path.join(metadata_path, metadata_files[0])
 
             try:
-                identifier = f"{namespace}.{table_name}"
+                identifier = self._table_identifier(table_name)
                 catalog.register_table(
                     identifier=identifier,
                     metadata_location=f"file://{latest_metadata}",
@@ -872,7 +902,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         # Handle truncation if requested
         if truncate_tables:
             for table_name in truncate_tables:
-                identifier = f"{namespace}.{table_name}"
+                identifier = self._table_identifier(table_name)
                 try:
                     catalog.drop_table(identifier)
                     logger.info(f"Truncated table {identifier}")
@@ -910,7 +940,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         """
         catalog = self._get_catalog()
         for name in table_names:
-            identifier = f"{self.config.namespace}.{name}"
+            identifier = self._table_identifier(name)
             try:
                 if hasattr(catalog, "purge_table"):
                     catalog.purge_table(identifier)
@@ -921,9 +951,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
                 pass
 
         if delete_schema:
-            version_identifier = (
-                f"{self.config.namespace}.{self.schema.version_table_name}"
-            )
+            version_identifier = self._table_identifier(self.schema.version_table_name)
             try:
                 version_table = catalog.load_table(version_identifier)
                 version_table.delete(EqualTo("schema_name", self.schema.name))
@@ -1000,7 +1028,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
 
             # Process each table
             for table_name, file_data in pending_files.items():
-                identifier = f"{namespace}.{table_name}"
+                identifier = self._table_identifier(table_name)
 
                 try:
                     self._commit_table_files(
@@ -1026,7 +1054,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
     def _store_completed_load(self, catalog, load_id: str) -> None:
         """Persist a load completion row in the internal _dlt_loads table."""
         loads_table_name = self.schema.loads_table_name
-        identifier = f"{self.config.namespace}.{loads_table_name}"
+        identifier = self._table_identifier(loads_table_name)
 
         inserted_at = pendulum.now("UTC").naive()
         load_row_schema = pa.schema([
