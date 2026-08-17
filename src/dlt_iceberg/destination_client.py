@@ -51,7 +51,10 @@ from .error_handling import (
     log_error_with_context,
     get_user_friendly_error_message,
 )
-from .merge_utils import build_primary_key_delete_filter
+from .merge_utils import (
+    iter_primary_key_delete_filters,
+    unique_primary_key_values,
+)
 from pyiceberg.io.pyarrow import schema_to_pyarrow
 
 # MODULE-LEVEL STATE: Accumulate files across client instances
@@ -147,8 +150,13 @@ class IcebergRestConfiguration(DestinationClientConfiguration):
     # Schema casting configuration
     strict_casting: bool = False
 
-    # Merge batch size (for upsert operations to avoid memory issues)
+    # Maximum rows per staged merge operation (legacy/default behavior).
     merge_batch_size: int = 500000
+
+    # Additional safety cap for composite keys. PyIceberg represents a
+    # composite match as an OR tree of AND predicates, so this keeps that tree
+    # bounded without penalizing the much flatter single-key IN predicate.
+    merge_composite_key_batch_size: int = 500
 
     # Table location layout - controls directory structure for table files
     # Supports patterns: {namespace}, {dataset_name}, {table_name}
@@ -1198,7 +1206,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         combined_table: pa.Table,
         primary_keys: List[str],
         identifier: str,
-        hard_delete_filter=None,
+        hard_delete_rows: Optional[pa.Table] = None,
     ) -> Tuple[int, int, int]:
         """Execute delete-insert merge strategy with optional hard deletes.
 
@@ -1210,14 +1218,14 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
             combined_table: Arrow table with data to merge
             primary_keys: List of primary key column names
             identifier: Table identifier for logging
-            hard_delete_filter: Optional filter for hard deletes (rows to permanently remove)
+            hard_delete_rows: Optional rows whose keys should be permanently removed
 
         Returns:
             Tuple of (rows_deleted_estimate, rows_inserted, hard_deleted)
         """
-        # Build delete filter from primary key values in incoming data
-        delete_filter, deleted_estimate = build_primary_key_delete_filter(
-            combined_table, primary_keys
+        batch_size = self._merge_batch_size(primary_keys)
+        deleted_estimate = len(
+            unique_primary_key_values(combined_table, primary_keys)
         )
 
         logger.info(
@@ -1225,34 +1233,129 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
             f"matching rows, inserting {len(combined_table)} rows"
         )
 
-        # Execute atomic hard-delete + delete + append using single transaction
+        # Each staged delete has a bounded predicate, while the transaction makes
+        # all hard-delete, delete, and append changes visible atomically.
         with iceberg_table.transaction() as txn:
-            # Hard deletes first (permanent removal)
-            if hard_delete_filter is not None:
-                txn.delete(hard_delete_filter)
-            # Then delete-insert for merge
-            txn.delete(delete_filter)
+            if hard_delete_rows is not None:
+                self._delete_primary_key_batches(
+                    txn, hard_delete_rows, primary_keys, batch_size, identifier,
+                    operation="hard delete",
+                )
+            self._delete_primary_key_batches(
+                txn, combined_table, primary_keys, batch_size, identifier,
+                operation="delete-insert",
+            )
             txn.append(combined_table)
 
-        return (deleted_estimate, len(combined_table), 1 if hard_delete_filter else 0)
+        return (
+            deleted_estimate,
+            len(combined_table),
+            len(hard_delete_rows) if hard_delete_rows is not None else 0,
+        )
+
+    def _merge_batch_size(self, primary_keys: List[str]) -> int:
+        """Return the configured batch size with the composite-key safety cap."""
+        batch_size = self.config.merge_batch_size
+        if batch_size <= 0:
+            raise ValueError("merge_batch_size must be greater than 0")
+        if len(primary_keys) > 1:
+            composite_batch_size = self.config.merge_composite_key_batch_size
+            if composite_batch_size <= 0:
+                raise ValueError(
+                    "merge_composite_key_batch_size must be greater than 0"
+                )
+            return min(batch_size, composite_batch_size)
+        return batch_size
+
+    def _delete_primary_key_batches(
+        self,
+        txn,
+        rows: pa.Table,
+        primary_keys: List[str],
+        batch_size: int,
+        identifier: str,
+        operation: str,
+    ) -> int:
+        """Stage bounded primary-key delete predicates in an open transaction."""
+        deleted_estimate = 0
+        for batch_number, (delete_filter, key_count) in enumerate(
+            iter_primary_key_delete_filters(rows, primary_keys, batch_size), start=1
+        ):
+            logger.info(
+                f"Staging {operation} batch {batch_number} for {identifier}: "
+                f"up to {key_count} keys"
+            )
+            txn.delete(delete_filter)
+            deleted_estimate += key_count
+        return deleted_estimate
+
+    def _execute_upsert(
+        self,
+        iceberg_table,
+        combined_table: pa.Table,
+        primary_keys: List[str],
+        identifier: str,
+        hard_delete_rows: Optional[pa.Table] = None,
+    ) -> Tuple[int, int, int]:
+        """Stage bounded upserts and optional hard deletes in one transaction."""
+        batch_size = self._merge_batch_size(primary_keys)
+        unique_key_count = len(
+            unique_primary_key_values(combined_table, primary_keys)
+        )
+        if unique_key_count != len(combined_table):
+            raise ValueError(
+                "Duplicate rows found in source dataset based on the key columns. "
+                "No upsert executed"
+            )
+
+        total_updated = 0
+        total_inserted = 0
+        batch_count = 0
+        with iceberg_table.transaction() as txn:
+            if hard_delete_rows is not None:
+                self._delete_primary_key_batches(
+                    txn, hard_delete_rows, primary_keys, batch_size, identifier,
+                    operation="hard delete",
+                )
+
+            for batch_number, batch_start in enumerate(
+                range(0, len(combined_table), batch_size), start=1
+            ):
+                batch_count = batch_number
+                batch = combined_table.slice(batch_start, batch_size)
+                logger.info(
+                    f"Staging upsert batch {batch_number} for {identifier}: "
+                    f"rows {batch_start} to {batch_start + len(batch)} "
+                    f"({len(batch)} rows)"
+                )
+                upsert_result = txn.upsert(
+                    df=batch,
+                    join_cols=primary_keys,
+                    when_matched_update_all=True,
+                    when_not_matched_insert_all=True,
+                )
+                total_updated += upsert_result.rows_updated
+                total_inserted += upsert_result.rows_inserted
+
+        return total_updated, total_inserted, batch_count
 
     def _prepare_hard_deletes(
         self,
         combined_table: pa.Table,
         primary_keys: List[str],
-    ) -> Tuple[pa.Table, Optional[Any], int]:
+    ) -> Tuple[pa.Table, Optional[pa.Table], int]:
         """
         Prepare hard deletes from incoming data (does not execute).
 
         Rows with the hard_delete_column set (non-null) will be deleted.
-        Returns the filter expression to use in a transaction.
+        Returns the marked rows so their key predicates can be built in bounded batches.
 
         Args:
             combined_table: Arrow table with data including possible delete markers
             primary_keys: List of primary key column names
 
         Returns:
-            Tuple of (remaining_rows, delete_filter_or_none, num_to_delete)
+            Tuple of (remaining_rows, delete_rows_or_none, num_to_delete)
         """
         hard_delete_col = self.config.hard_delete_column
 
@@ -1273,10 +1376,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         if len(rows_to_delete) == 0:
             return rows_to_keep, None, 0
 
-        # Build delete filter from primary keys of rows to delete
-        delete_filter, _ = build_primary_key_delete_filter(rows_to_delete, primary_keys)
-
-        return rows_to_keep, delete_filter, len(rows_to_delete)
+        return rows_to_keep, rows_to_delete, len(rows_to_delete)
 
     def _commit_table_files(
         self,
@@ -1428,17 +1528,30 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
                         iceberg_table.append(combined_table)
                     else:
                         # Prepare hard deletes (rows marked for deletion)
-                        remaining_rows, hard_delete_filter, num_hard_deletes = self._prepare_hard_deletes(
-                            combined_table, primary_keys
-                        )
+                        (
+                            remaining_rows,
+                            hard_delete_rows,
+                            num_hard_deletes,
+                        ) = self._prepare_hard_deletes(combined_table, primary_keys)
                         if num_hard_deletes > 0:
                             logger.info(f"Prepared {num_hard_deletes} rows for hard delete")
 
                         # If all rows were hard deletes, just execute the delete
                         if len(remaining_rows) == 0:
-                            if hard_delete_filter is not None:
-                                iceberg_table.delete(hard_delete_filter)
-                                logger.info(f"Executed {num_hard_deletes} hard deletes (no merge needed)")
+                            if hard_delete_rows is not None:
+                                with iceberg_table.transaction() as txn:
+                                    self._delete_primary_key_batches(
+                                        txn,
+                                        hard_delete_rows,
+                                        primary_keys,
+                                        self._merge_batch_size(primary_keys),
+                                        identifier,
+                                        operation="hard delete",
+                                    )
+                                logger.info(
+                                    f"Executed {num_hard_deletes} hard deletes "
+                                    f"(no merge needed)"
+                                )
                             return
 
                         # Get merge strategy
@@ -1452,45 +1565,31 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
                             # Atomic hard-delete + delete + insert in single transaction
                             deleted, inserted, _ = self._execute_delete_insert(
                                 iceberg_table, remaining_rows, primary_keys, identifier,
-                                hard_delete_filter=hard_delete_filter
+                                hard_delete_rows=hard_delete_rows
                             )
                             logger.info(
                                 f"Delete-insert completed: ~{deleted} deleted, "
                                 f"{inserted} inserted"
                             )
                         else:
-                            # Default: upsert strategy
-                            # Execute hard deletes first (separate transaction since upsert is atomic)
-                            if hard_delete_filter is not None:
-                                iceberg_table.delete(hard_delete_filter)
-                                logger.info(f"Executed {num_hard_deletes} hard deletes before upsert")
-
-                            batch_size = self.config.merge_batch_size
-                            total_updated = 0
-                            total_inserted = 0
-
-                            for batch_start in range(0, len(remaining_rows), batch_size):
-                                batch_end = min(batch_start + batch_size, len(remaining_rows))
-                                batch = remaining_rows.slice(batch_start, batch_end - batch_start)
-
-                                logger.info(
-                                    f"Upserting batch {batch_start//batch_size + 1}: "
-                                    f"rows {batch_start} to {batch_end} ({len(batch)} rows)"
-                                )
-
-                                upsert_result = iceberg_table.upsert(
-                                    df=batch,
-                                    join_cols=primary_keys,
-                                    when_matched_update_all=True,
-                                    when_not_matched_insert_all=True,
-                                )
-
-                                total_updated += upsert_result.rows_updated
-                                total_inserted += upsert_result.rows_inserted
+                            # The transaction keeps all bounded upsert and hard-delete
+                            # batches atomic at the table level.
+                            (
+                                total_updated,
+                                total_inserted,
+                                batch_count,
+                            ) = self._execute_upsert(
+                                iceberg_table,
+                                remaining_rows,
+                                primary_keys,
+                                identifier,
+                                hard_delete_rows=hard_delete_rows,
+                            )
 
                             logger.info(
                                 f"Upsert completed: {total_updated} updated, "
-                                f"{total_inserted} inserted across {(len(remaining_rows) + batch_size - 1) // batch_size} batches"
+                                f"{total_inserted} inserted across "
+                                f"{batch_count} batches"
                             )
                 else:
                     raise ValueError(f"Unknown write disposition: {disposition_type}")

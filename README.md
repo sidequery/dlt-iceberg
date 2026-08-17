@@ -118,7 +118,8 @@ iceberg_rest(
     # Performance tuning
     max_retries=5,               # Retry attempts for transient failures
     retry_backoff_base=2.0,      # Exponential backoff multiplier
-    merge_batch_size=500000,     # Rows per batch for merge operations
+    merge_batch_size=500000,     # General maximum rows per merge batch
+    merge_composite_key_batch_size=500,  # Safety cap for composite keys
     strict_casting=False,        # Fail on potential data loss
 
     # Table management
@@ -341,6 +342,12 @@ Truncates table and inserts new data.
 ```
 Deletes matching rows then inserts new data. Single atomic transaction.
 
+Composite-key delete predicates are staged in batches of at most
+`min(merge_batch_size, merge_composite_key_batch_size)` keys to bound
+PyIceberg's nested expression size. Single-key merges keep the general
+`merge_batch_size` limit. All delete batches and the append are committed
+together, so readers see the table-level change atomically.
+
 #### Upsert Strategy
 ```python
 @dlt.resource(
@@ -349,6 +356,15 @@ Deletes matching rows then inserts new data. Single atomic transaction.
 )
 ```
 Updates existing rows, inserts new rows.
+
+Upserts are staged inside one PyIceberg transaction. Single-key upserts use
+`merge_batch_size` (default 500,000); composite-key upserts also apply
+`merge_composite_key_batch_size` (default 500) because PyIceberg builds a
+nested OR-of-ANDs match expression for those keys. Lower values reduce peak
+native memory and expression depth at the cost of more scans and staged
+snapshot updates. The final metadata commit is atomic for a table, including
+hard deletes, but a dlt load that touches multiple tables is not atomic across
+those tables.
 
 #### Hard Deletes
 
