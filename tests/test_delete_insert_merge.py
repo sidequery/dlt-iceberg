@@ -169,6 +169,75 @@ class TestDeleteInsertMerge:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_large_composite_merge_commits_one_snapshot(self):
+        """Merge 15,000 composite keys without predicates, caps, or partial snapshots."""
+        temp_dir = tempfile.mkdtemp()
+        warehouse_path = f"{temp_dir}/warehouse"
+        catalog_path = f"{temp_dir}/catalog.db"
+
+        try:
+            from dlt_iceberg import iceberg_rest
+
+            pipeline = dlt.pipeline(
+                pipeline_name="test_large_composite_key",
+                destination=iceberg_rest(
+                    catalog_uri=f"sqlite:///{catalog_path}",
+                    warehouse=f"file://{warehouse_path}",
+                    namespace="test_large_composite",
+                    merge_batch_size=1,
+                ),
+                dataset_name="test_dataset",
+            )
+
+            @dlt.resource(
+                name="events",
+                write_disposition={"disposition": "merge", "strategy": "delete-insert"},
+                primary_key=["account_id", "item_id"],
+            )
+            def initial_events():
+                for row in range(20_000):
+                    yield {"account_id": row // 10, "item_id": row % 10, "value": row}
+
+            load_info = pipeline.run(initial_events())
+            assert not load_info.has_failed_jobs
+
+            catalog = load_catalog(
+                "dlt_catalog",
+                type="sql",
+                uri=f"sqlite:///{catalog_path}",
+                warehouse=f"file://{warehouse_path}",
+            )
+            table = catalog.load_table("test_large_composite.events")
+            initial_snapshot = table.current_snapshot()
+            assert initial_snapshot is not None
+
+            @dlt.resource(
+                name="events",
+                write_disposition={"disposition": "merge", "strategy": "delete-insert"},
+                primary_key=["account_id", "item_id"],
+            )
+            def updated_events():
+                for row in range(10_000, 25_000):
+                    yield {"account_id": row // 10, "item_id": row % 10, "value": -row}
+
+            load_info = pipeline.run(updated_events())
+            assert not load_info.has_failed_jobs
+
+            table = catalog.load_table("test_large_composite.events")
+            merged_snapshot = table.current_snapshot()
+            assert merged_snapshot is not None
+            assert merged_snapshot.parent_snapshot_id == initial_snapshot.snapshot_id
+
+            result = table.scan().to_arrow().sort_by(
+                [("account_id", "ascending"), ("item_id", "ascending")]
+            )
+            assert result.num_rows == 25_000
+            values = result.column("value").to_pylist()
+            assert values[:10_000] == list(range(10_000))
+            assert values[10_000:] == [-row for row in range(10_000, 25_000)]
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_upsert_backward_compatibility(self):
         """Test that string 'merge' disposition still uses upsert."""
         temp_dir = tempfile.mkdtemp()

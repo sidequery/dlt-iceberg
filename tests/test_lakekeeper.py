@@ -98,7 +98,7 @@ def get_lakekeeper_destination(namespace: str = "lk_test"):
 @pytest.mark.integration
 @pytest.mark.skipif(
     not is_lakekeeper_available(),
-    reason="Lakekeeper catalog not available. Run: docker compose up -d"
+    reason="Lakekeeper catalog not available. Run: docker compose up -d",
 )
 def test_lakekeeper_basic_load():
     """
@@ -223,6 +223,66 @@ def test_lakekeeper_merge_upsert():
     assert inactive_count == 3, f"Expected 3 inactive users, got {inactive_count}"
 
     print(f"Merge verified: {len(result)} rows, {inactive_count} inactive")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not is_lakekeeper_available(),
+    reason="Lakekeeper catalog not available. Run: docker compose up -d"
+)
+def test_lakekeeper_large_composite_equality_delete_merge():
+    """Merge 50,000 composite keys through a real REST catalog in one snapshot."""
+    cleanup_table("lk_large_merge", "events")
+
+    @dlt.resource(
+        name="events",
+        write_disposition="merge",
+        primary_key=["account_id", "item_id"],
+    )
+    def initial_events():
+        for row in range(100_000):
+            yield {"account_id": row // 10, "item_id": row % 10, "value": row}
+
+    pipeline = dlt.pipeline(
+        pipeline_name="test_lakekeeper_large_merge",
+        destination=get_lakekeeper_destination("lk_large_merge"),
+        dataset_name="lk_large_merge_dataset",
+    )
+    load_info = pipeline.run(initial_events())
+    assert not load_info.has_failed_jobs
+
+    catalog = get_lakekeeper_catalog("verify_large_merge")
+    table = catalog.load_table("lk_large_merge.events")
+    initial_snapshot = table.current_snapshot()
+    assert initial_snapshot is not None
+
+    @dlt.resource(
+        name="events",
+        write_disposition="merge",
+        primary_key=["account_id", "item_id"],
+    )
+    def updated_events():
+        for row in range(75_000, 125_000):
+            yield {"account_id": row // 10, "item_id": row % 10, "value": -row}
+
+    load_info = pipeline.run(updated_events())
+    assert not load_info.has_failed_jobs
+
+    table = catalog.load_table("lk_large_merge.events")
+    merged_snapshot = table.current_snapshot()
+    assert merged_snapshot is not None
+    assert merged_snapshot.parent_snapshot_id == initial_snapshot.snapshot_id
+
+    result = table.scan().select("account_id", "item_id", "value").to_arrow()
+    assert result.num_rows == 125_000
+    rows = {
+        (row["account_id"], row["item_id"]): row["value"]
+        for row in result.to_pylist()
+        if row["account_id"] in {0, 7500, 12499}
+    }
+    assert rows[(0, 0)] == 0
+    assert rows[(7500, 0)] == -75_000
+    assert rows[(12499, 9)] == -124_999
 
 
 @pytest.mark.integration

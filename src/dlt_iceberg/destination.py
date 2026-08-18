@@ -32,7 +32,6 @@ from .error_handling import (
     log_error_with_context,
     get_user_friendly_error_message,
 )
-from .merge_utils import build_primary_key_delete_filter
 from pyiceberg.io.pyarrow import schema_to_pyarrow
 
 logger = logging.getLogger(__name__)
@@ -60,8 +59,7 @@ def _get_merge_strategy(table_schema: TTableSchema) -> str:
 def _execute_delete_insert(iceberg_table, arrow_table, primary_keys: list, identifier: str):
     """Execute delete-insert merge strategy.
 
-    Deletes rows matching primary keys in incoming data, then appends new data.
-    Uses PyIceberg transaction for atomic delete + append.
+    Writes source-key equality deletes and replacement rows in one row delta.
 
     Args:
         iceberg_table: PyIceberg table object
@@ -72,20 +70,14 @@ def _execute_delete_insert(iceberg_table, arrow_table, primary_keys: list, ident
     Returns:
         Tuple of (rows_deleted_estimate, rows_inserted)
     """
-    # Build delete filter from primary key values in incoming data
-    delete_filter, deleted_estimate = build_primary_key_delete_filter(
-        arrow_table, primary_keys
-    )
+    deleted_estimate = len(arrow_table)
 
     logger.info(
         f"Delete-insert for {identifier}: deleting up to {deleted_estimate} "
         f"matching rows, inserting {len(arrow_table)} rows"
     )
 
-    # Execute atomic delete + append using transaction
-    with iceberg_table.transaction() as txn:
-        txn.delete(delete_filter)
-        txn.append(arrow_table)
+    iceberg_table.upsert_by_equality_delete(df=arrow_table, join_cols=primary_keys)
 
     return (deleted_estimate, len(arrow_table))
 
@@ -361,27 +353,13 @@ def _iceberg_rest_handler(
                         f"using strategy: {merge_strategy}"
                     )
 
-                    if merge_strategy == "delete-insert":
-                        # Atomic delete + insert
-                        deleted, inserted = _execute_delete_insert(
-                            iceberg_table, arrow_table, primary_keys, identifier
-                        )
-                        logger.info(
-                            f"Delete-insert completed: ~{deleted} deleted, "
-                            f"{inserted} inserted"
-                        )
-                    else:
-                        # Default: upsert strategy
-                        upsert_result = iceberg_table.upsert(
-                            df=arrow_table,
-                            join_cols=primary_keys,
-                            when_matched_update_all=True,
-                            when_not_matched_insert_all=True,
-                        )
-                        logger.info(
-                            f"Upsert completed: {upsert_result.rows_updated} updated, "
-                            f"{upsert_result.rows_inserted} inserted"
-                        )
+                    deleted, inserted = _execute_delete_insert(
+                        iceberg_table, arrow_table, primary_keys, identifier
+                    )
+                    logger.info(
+                        f"{merge_strategy} equality-delete merge completed: "
+                        f"{deleted} replacement keys, {inserted} inserted rows"
+                    )
             else:
                 raise ValueError(f"Unknown write disposition: {disposition_type}")
 
