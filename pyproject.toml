@@ -27,7 +27,7 @@ dependencies = [
     "pandas>=2.3.3",
     "pyarrow>=21.0.0",
     "pydantic<2.11",
-    "pyiceberg[pyiceberg-core] @ git+https://github.com/sidequery/iceberg-python.git@4094ab33e9555c8585f4b1c0887418f6d5ad3bcc",
+    "pyiceberg[pyiceberg-core] @ git+https://github.com/sidequery/iceberg-python.git@ff9d01f6410740008bd3c7d0a01491da9a702955",
     "requests>=2.32.5",
     "s3fs>=2024.0.0",  # Modern async version required for credential vending compatibility
     "sqlalchemy>=2.0.44",

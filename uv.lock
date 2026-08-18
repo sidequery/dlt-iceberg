@@ -387,7 +387,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "pyarrow", specifier = ">=21.0.0" },
     { name = "pydantic", specifier = "<2.11" },
-    { name = "pyiceberg", extras = ["pyiceberg-core"], git = "https://github.com/sidequery/iceberg-python.git?rev=4094ab33e9555c8585f4b1c0887418f6d5ad3bcc" },
+    { name = "pyiceberg", extras = ["pyiceberg-core"], git = "https://github.com/sidequery/iceberg-python.git?rev=ff9d01f6410740008bd3c7d0a01491da9a702955" },
     { name = "requests", specifier = ">=2.32.5" },
     { name = "s3fs", specifier = ">=2024.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.44" },
@@ -1414,7 +1414,7 @@ wheels = [
 [[package]]
 name = "pyiceberg"
 version = "0.12.0"
-source = { git = "https://github.com/sidequery/iceberg-python.git?rev=4094ab33e9555c8585f4b1c0887418f6d5ad3bcc#4094ab33e9555c8585f4b1c0887418f6d5ad3bcc" }
+source = { git = "https://github.com/sidequery/iceberg-python.git?rev=ff9d01f6410740008bd3c7d0a01491da9a702955#ff9d01f6410740008bd3c7d0a01491da9a702955" }
 dependencies = [
     { name = "cachetools" },
     { name = "click" },
