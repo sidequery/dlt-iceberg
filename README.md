@@ -118,7 +118,7 @@ iceberg_rest(
     # Performance tuning
     max_retries=5,               # Retry attempts for transient failures
     retry_backoff_base=2.0,      # Exponential backoff multiplier
-    merge_batch_size=500000,     # Rows per batch for merge operations
+    merge_batch_size=None,       # Deprecated compatibility option; ignored
     strict_casting=False,        # Fail on potential data loss
 
     # Table management
@@ -339,7 +339,9 @@ Truncates table and inserts new data.
     primary_key="user_id"
 )
 ```
-Deletes matching rows then inserts new data. Single atomic transaction.
+Writes equality deletes for the incoming keys and appends the replacements in a
+single Iceberg row-delta snapshot. It does not build a composite predicate or
+split the source into independently visible batches.
 
 #### Upsert Strategy
 ```python
@@ -348,7 +350,23 @@ Deletes matching rows then inserts new data. Single atomic transaction.
     primary_key="user_id"
 )
 ```
-Updates existing rows, inserts new rows.
+Uses the same equality-delete row delta as delete-insert. Existing rows with the
+incoming keys are hidden and the incoming rows are appended atomically.
+
+Merge tables must use Iceberg format version 2 or later, and every reader must
+support equality deletes. Composite-key merge size is not capped by a row-count
+setting. The deprecated `merge_batch_size` option is accepted for configuration
+compatibility but has no effect.
+
+Snapshot visibility is atomic: readers see either the old snapshot or both the
+delete files and replacement data. Data/delete files are written before the
+catalog commit, so a failed metadata commit can leave unreferenced files for
+normal Iceberg orphan-file cleanup. Concurrent commits follow Iceberg sequence
+semantics: a later equality delete can hide matching rows from an earlier commit,
+while rows committed after that delete survive.
+
+For partitioned tables, every partition source column must be part of the merge
+key. Equality-delete merges currently reject tables with evolved partition specs.
 
 #### Hard Deletes
 
