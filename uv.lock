@@ -367,9 +367,9 @@ dependencies = [
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "pydantic" },
-    { name = "pyiceberg", extra = ["pyiceberg-core"] },
     { name = "requests" },
     { name = "s3fs" },
+    { name = "sidequery-pyiceberg", extra = ["pyiceberg-core"] },
     { name = "sqlalchemy" },
 ]
 
@@ -387,9 +387,9 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "pyarrow", specifier = ">=21.0.0" },
     { name = "pydantic", specifier = "<2.11" },
-    { name = "pyiceberg", extras = ["pyiceberg-core"], git = "https://github.com/sidequery/iceberg-python.git?rev=4094ab33e9555c8585f4b1c0887418f6d5ad3bcc" },
     { name = "requests", specifier = ">=2.32.5" },
     { name = "s3fs", specifier = ">=2024.0.0" },
+    { name = "sidequery-pyiceberg", extras = ["pyiceberg-core"], specifier = "==0.12.0.post1" },
     { name = "sqlalchemy", specifier = ">=2.0.44" },
 ]
 
@@ -1412,30 +1412,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pyiceberg"
-version = "0.12.0"
-source = { git = "https://github.com/sidequery/iceberg-python.git?rev=4094ab33e9555c8585f4b1c0887418f6d5ad3bcc#4094ab33e9555c8585f4b1c0887418f6d5ad3bcc" }
-dependencies = [
-    { name = "cachetools" },
-    { name = "click" },
-    { name = "fsspec" },
-    { name = "mmh3" },
-    { name = "pydantic" },
-    { name = "pyparsing" },
-    { name = "pyroaring" },
-    { name = "requests" },
-    { name = "rich" },
-    { name = "strictyaml" },
-    { name = "tenacity" },
-    { name = "zstandard" },
-]
-
-[package.optional-dependencies]
-pyiceberg-core = [
-    { name = "pyiceberg-core" },
-]
-
-[[package]]
 name = "pyiceberg-core"
 version = "0.10.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1724,6 +1700,61 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/18/5d/3bf57dcd21979b887f014ea83c24ae194cfcd12b9e0fda66b957c69d1fca/setuptools-80.9.0.tar.gz", hash = "sha256:f36b47402ecde768dbfafc46e8e4207b4360c654f1f3bb84475f0a28628fb19c", size = 1319958, upload-time = "2025-05-27T00:56:51.443Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a3/dc/17031897dae0efacfea57dfd3a82fdd2a2aeb58e0ff71b77b87e44edc772/setuptools-80.9.0-py3-none-any.whl", hash = "sha256:062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922", size = 1201486, upload-time = "2025-05-27T00:56:49.664Z" },
+]
+
+[[package]]
+name = "sidequery-pyiceberg"
+version = "0.12.0.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cachetools" },
+    { name = "click" },
+    { name = "fsspec" },
+    { name = "mmh3" },
+    { name = "pydantic" },
+    { name = "pyparsing" },
+    { name = "pyroaring" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "strictyaml" },
+    { name = "tenacity" },
+    { name = "zstandard" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/56/6c/44cbeea09caa8f3a23f4ab6f1dfb14de86328785dce82735b5a03a43f534/sidequery_pyiceberg-0.12.0.post1.tar.gz", hash = "sha256:3aa8eea624d8d8bf666264bb45f6dc3fd99faa38e1e549af458b67822dee94eb", size = 1221563, upload-time = "2026-08-18T06:47:49.808Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/91/bdead00fe0877846f3b38c024778afb6241c79c6956157169a00221680b2/sidequery_pyiceberg-0.12.0.post1-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:396c5eebdfa42cc6e230fdffa7c268c159d8e62ca61e0b6d4a6fb2182b9f4d07", size = 569889, upload-time = "2026-08-18T06:47:04.074Z" },
+    { url = "https://files.pythonhosted.org/packages/76/0c/3b435a8b3abf260a10a3f2445b67ca33923eb4d94eb393d3ea125dd72f8c/sidequery_pyiceberg-0.12.0.post1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:0ce7bc62456f1edb5cd3232820a03501dd814a209da9e9ecef69e35486b53646", size = 571264, upload-time = "2026-08-18T06:47:05.505Z" },
+    { url = "https://files.pythonhosted.org/packages/34/ed/8e10e72894f7adb07073e77b66a2d65b44464c80b0af7503e6513ab619c2/sidequery_pyiceberg-0.12.0.post1-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c04ae9bfe2337f8a0074fca3d66412e2701a5f4824cba5d202c3301dece2c93d", size = 765397, upload-time = "2026-08-18T06:47:06.897Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/65/9983fbae88a3bfb1edb61ccaf780ffb7b0c53bfd920ab664bc43ea70a58c/sidequery_pyiceberg-0.12.0.post1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b8f8d32ff675a3357fc784b8f0a23e2cef712b99da67f458532ea9765677535a", size = 763792, upload-time = "2026-08-18T06:47:08.381Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/3d/e27bafd2082328709f0968dfa37dfa95584388414346aaee8ca145be1b45/sidequery_pyiceberg-0.12.0.post1-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:202414c549f18185e4c1e5a6cbcbb6608a8174f4535a7cf8d0ddc58d9d7dbb76", size = 760158, upload-time = "2026-08-18T06:47:10.339Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/b9/2660040bc0109b01b1229a656a9b4818730f4bb49ead92a2b6a81a80643a/sidequery_pyiceberg-0.12.0.post1-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:e171e1714e34bcd0b8a769e56f9bd1043780fdd43f9db3e6b6853e330f227eca", size = 761470, upload-time = "2026-08-18T06:47:12.083Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/1f/d931b5bacc2471d3d978fdd1c7a92799d5d5d6e8bcfc9c1b39ee4b328843/sidequery_pyiceberg-0.12.0.post1-cp311-cp311-win_amd64.whl", hash = "sha256:52214ab7a9290a287ebf6e1d8875309239ef3451b21670586a50f5f857afd504", size = 567991, upload-time = "2026-08-18T06:47:13.531Z" },
+    { url = "https://files.pythonhosted.org/packages/24/ea/5a7d947cd36284c5c37ec825d1c32107581cf8b731cf1ecd9cde72556718/sidequery_pyiceberg-0.12.0.post1-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:40d61e5aaaf82c97b9f7fe505c20317659ed4bcd3df5e58733b30ca1f7cf67b9", size = 570404, upload-time = "2026-08-18T06:47:15.356Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/93/86b8e16f7faf7b653924f6c03a0098a351501309c86c14c236e5cc88cf25/sidequery_pyiceberg-0.12.0.post1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:40f8cce7c9a5cbfabec37ab196bf4d27b31afe4a09a2ea6bf2ce2ba9613e5037", size = 571100, upload-time = "2026-08-18T06:47:17.045Z" },
+    { url = "https://files.pythonhosted.org/packages/62/d4/24bf787eaad0f9068b80c79b63f8139c7c440499d84aec1374696993aeb6/sidequery_pyiceberg-0.12.0.post1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a96d66adaf8596f3b1b9d5c32449afbe36f4638eddb21183236170ec45eec2d7", size = 773086, upload-time = "2026-08-18T06:47:18.542Z" },
+    { url = "https://files.pythonhosted.org/packages/15/0a/ffc7adc11210b21bfd7c5060ce011e6c1133ad4b218d4aa4cfd79ba4e675/sidequery_pyiceberg-0.12.0.post1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4a85f8e2056ab49c29c9a112db94a7900664b177451a25bca03856bb8b813390", size = 774600, upload-time = "2026-08-18T06:47:20.407Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/1c/1cac1b53bd59e529ce2fafaab139f4a2cab6179a149ca58d65dd4c113f9d/sidequery_pyiceberg-0.12.0.post1-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:6d20ca2edea10bf1b13a0dc1aeddafca61896ea0afb0f456a2e63c23e82c7ee5", size = 766441, upload-time = "2026-08-18T06:47:22.09Z" },
+    { url = "https://files.pythonhosted.org/packages/33/45/fe67ac8c457ccfc05965555bb975adce0f757c803823ca143a7048148fbc/sidequery_pyiceberg-0.12.0.post1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:bf0de8fe45df84e043d868af6a74c6fb9ebcd7462f264e860aaa6afbc9217501", size = 770726, upload-time = "2026-08-18T06:47:23.665Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/4e/d661681b3d264c9a3b539b99146cd0f5e0df289989b1338d32c15583c871/sidequery_pyiceberg-0.12.0.post1-cp312-cp312-win_amd64.whl", hash = "sha256:590145cc4214d0079a419f61fef767062fbaf8c5bc0103ce92fa1abb2e374610", size = 567871, upload-time = "2026-08-18T06:47:25.324Z" },
+    { url = "https://files.pythonhosted.org/packages/70/e9/76de2683789e8242407ed44978572436dbcf7b314d26b37f3b5d2f1039a8/sidequery_pyiceberg-0.12.0.post1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:8ca9689be79735b096e3252e4710a2d8ba73716cae5a2dd21bb6ee326ba90d54", size = 570084, upload-time = "2026-08-18T06:47:27.061Z" },
+    { url = "https://files.pythonhosted.org/packages/79/39/4ba9812effa2da190647f73c6984e101798bc64ad53d387e200bbdeb152e/sidequery_pyiceberg-0.12.0.post1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:ff4837baa58c89a6bce5095cf2ef84ddc097f25649f39a5e5b063a2406672264", size = 570669, upload-time = "2026-08-18T06:47:28.743Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/69/4944f7f3f20ed03a613c926c00b16ef12ff8fc39bf28ebb59027a53e42ff/sidequery_pyiceberg-0.12.0.post1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:678f4762da2bfa9211ed127a0436fa62de1a5245c111df9ad9b46a95740fcbef", size = 764463, upload-time = "2026-08-18T06:47:30.199Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/fb/5ddc9ea2524bf79e1303bcb82532cb72def42a1d9ae36590ca0dfcb723c6/sidequery_pyiceberg-0.12.0.post1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a29adeea88c662959e08da6a87a0e1fd1cca1543c51fc495ce8a18f4490c5ccf", size = 766082, upload-time = "2026-08-18T06:47:31.877Z" },
+    { url = "https://files.pythonhosted.org/packages/64/c5/039b209303ab7e812403b3d51d895f72173a89e1bbba7bfe17dc5045b80c/sidequery_pyiceberg-0.12.0.post1-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:03e738cf613543505310e09cbebb14a8545fad97431078aadee5f21b7e28c05f", size = 758935, upload-time = "2026-08-18T06:47:33.428Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/06/f84b9550c9ff85339a8bd77b45f5dc6465057d0e2f4234f0553ddffdf33e/sidequery_pyiceberg-0.12.0.post1-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:1ca542cdbb1ea282653567f499465245c6f08f90833a691c2e212c4cff12a9a6", size = 763178, upload-time = "2026-08-18T06:47:35.031Z" },
+    { url = "https://files.pythonhosted.org/packages/88/81/016aadf0a556e44165f876b6ad2cff9da2deb9b4e0bf3e50d9d194ee277a/sidequery_pyiceberg-0.12.0.post1-cp313-cp313-win_amd64.whl", hash = "sha256:17f650166d47e7dfadf3d5864c2b4a7d4848838c09f7242fd9bc0769e574689a", size = 567172, upload-time = "2026-08-18T06:47:36.488Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/a2/b3bb6397d1101df172c2f9fae62644878e6b04116ebd7186c2bcef9c34b2/sidequery_pyiceberg-0.12.0.post1-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:63c36381bfb9211b6ea879e7c9d967459442759a0c2a9cf4ffe4a57176f328cc", size = 570339, upload-time = "2026-08-18T06:47:37.974Z" },
+    { url = "https://files.pythonhosted.org/packages/95/3c/de9dcb0bdbe830d444fd4e740b8c7e9c3958abd2c692cb1c4ad8bd142ecf/sidequery_pyiceberg-0.12.0.post1-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:a4519f3cb489d17e16bc8653e8b14b4f62064e5d94abde775acde8ba617704f9", size = 571065, upload-time = "2026-08-18T06:47:39.515Z" },
+    { url = "https://files.pythonhosted.org/packages/23/30/94c52de091137e15e2feae5698987cebce1639f0b9ae07a7d291f6078d86/sidequery_pyiceberg-0.12.0.post1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:92b557d969e5b93e10c2d1136c8ef9f10cd01e01eb59e2b8e1ca9dabac762c81", size = 764147, upload-time = "2026-08-18T06:47:41.201Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/f1/2f2e95a7b1154a89b75fcadd635dcdb8fefce6bce5a047cbb7422b273d99/sidequery_pyiceberg-0.12.0.post1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:25727cae26b2bc80863418dc8a9bda8faefeefc2c08728e4e6f8fcad2150b63a", size = 764327, upload-time = "2026-08-18T06:47:43.277Z" },
+    { url = "https://files.pythonhosted.org/packages/99/52/f46632b61fc12fec77c262ae6c8ec78528dcac340fd26285de0f82276368/sidequery_pyiceberg-0.12.0.post1-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:1cb3a7fb744a1f817497213b32645720e2e9907250c5512adad7599ffa6f43c3", size = 758800, upload-time = "2026-08-18T06:47:44.722Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/da/537410df0a6b1761295c295c00ae4d9dd179cdf184f0485bc12a1b57d916/sidequery_pyiceberg-0.12.0.post1-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:e11b2c8f0824a6c2ace26a0069896e207e39156489c62a48f7235b87b2b64ed1", size = 762099, upload-time = "2026-08-18T06:47:46.331Z" },
+    { url = "https://files.pythonhosted.org/packages/87/02/87b3f2586922b7776fed06da0143936249689fc767e5aff94ffad571ec6c/sidequery_pyiceberg-0.12.0.post1-cp314-cp314-win_amd64.whl", hash = "sha256:48dc7d745bfa2f4a6cd0ab12258d009c0bdf20057edff0cf6d09cdc61e3eda57", size = 564712, upload-time = "2026-08-18T06:47:47.964Z" },
+]
+
+[package.optional-dependencies]
+pyiceberg-core = [
+    { name = "pyiceberg-core" },
 ]
 
 [[package]]
