@@ -51,7 +51,6 @@ from .error_handling import (
     log_error_with_context,
     get_user_friendly_error_message,
 )
-from .merge_utils import build_primary_key_delete_filter
 from pyiceberg.io.pyarrow import schema_to_pyarrow
 
 # MODULE-LEVEL STATE: Accumulate files across client instances
@@ -147,8 +146,8 @@ class IcebergRestConfiguration(DestinationClientConfiguration):
     # Schema casting configuration
     strict_casting: bool = False
 
-    # Merge batch size (for upsert operations to avoid memory issues)
-    merge_batch_size: int = 500000
+    # Deprecated compatibility option. Equality-delete merges are not row-batched.
+    merge_batch_size: Optional[int] = None
 
     # Table location layout - controls directory structure for table files
     # Supports patterns: {namespace}, {dataset_name}, {table_name}
@@ -1198,61 +1197,52 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         combined_table: pa.Table,
         primary_keys: List[str],
         identifier: str,
-        hard_delete_filter=None,
+        hard_delete_rows: Optional[pa.Table] = None,
     ) -> Tuple[int, int, int]:
         """Execute delete-insert merge strategy with optional hard deletes.
 
-        Deletes rows matching primary keys in incoming data, then appends new data.
-        Uses PyIceberg transaction for atomic hard-delete + delete + append.
+        Writes source-key equality deletes and replacement rows in one row delta.
 
         Args:
             iceberg_table: PyIceberg table object
             combined_table: Arrow table with data to merge
             primary_keys: List of primary key column names
             identifier: Table identifier for logging
-            hard_delete_filter: Optional filter for hard deletes (rows to permanently remove)
+            hard_delete_rows: Optional delete-only source rows
 
         Returns:
             Tuple of (rows_deleted_estimate, rows_inserted, hard_deleted)
         """
-        # Build delete filter from primary key values in incoming data
-        delete_filter, deleted_estimate = build_primary_key_delete_filter(
-            combined_table, primary_keys
-        )
+        deleted_estimate = len(combined_table)
 
         logger.info(
             f"Delete-insert for {identifier}: deleting up to {deleted_estimate} "
             f"matching rows, inserting {len(combined_table)} rows"
         )
 
-        # Execute atomic hard-delete + delete + append using single transaction
-        with iceberg_table.transaction() as txn:
-            # Hard deletes first (permanent removal)
-            if hard_delete_filter is not None:
-                txn.delete(hard_delete_filter)
-            # Then delete-insert for merge
-            txn.delete(delete_filter)
-            txn.append(combined_table)
+        iceberg_table.upsert_by_equality_delete(
+            df=combined_table,
+            join_cols=primary_keys,
+            delete_df=hard_delete_rows,
+        )
 
-        return (deleted_estimate, len(combined_table), 1 if hard_delete_filter else 0)
+        hard_deleted = len(hard_delete_rows) if hard_delete_rows is not None else 0
+        return (deleted_estimate, len(combined_table), hard_deleted)
 
     def _prepare_hard_deletes(
         self,
         combined_table: pa.Table,
-        primary_keys: List[str],
-    ) -> Tuple[pa.Table, Optional[Any], int]:
+    ) -> Tuple[pa.Table, Optional[pa.Table], int]:
         """
         Prepare hard deletes from incoming data (does not execute).
 
         Rows with the hard_delete_column set (non-null) will be deleted.
-        Returns the filter expression to use in a transaction.
+        Returns delete-only rows for the equality-delete row delta.
 
         Args:
             combined_table: Arrow table with data including possible delete markers
-            primary_keys: List of primary key column names
-
         Returns:
-            Tuple of (remaining_rows, delete_filter_or_none, num_to_delete)
+            Tuple of (remaining_rows, delete_rows_or_none, num_to_delete)
         """
         hard_delete_col = self.config.hard_delete_column
 
@@ -1273,10 +1263,7 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
         if len(rows_to_delete) == 0:
             return rows_to_keep, None, 0
 
-        # Build delete filter from primary keys of rows to delete
-        delete_filter, _ = build_primary_key_delete_filter(rows_to_delete, primary_keys)
-
-        return rows_to_keep, delete_filter, len(rows_to_delete)
+        return rows_to_keep, rows_to_delete, len(rows_to_delete)
 
     def _commit_table_files(
         self,
@@ -1428,16 +1415,18 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
                         iceberg_table.append(combined_table)
                     else:
                         # Prepare hard deletes (rows marked for deletion)
-                        remaining_rows, hard_delete_filter, num_hard_deletes = self._prepare_hard_deletes(
-                            combined_table, primary_keys
-                        )
+                        remaining_rows, hard_delete_rows, num_hard_deletes = self._prepare_hard_deletes(combined_table)
                         if num_hard_deletes > 0:
                             logger.info(f"Prepared {num_hard_deletes} rows for hard delete")
 
-                        # If all rows were hard deletes, just execute the delete
+                        # If all rows were hard deletes, commit a delete-only row delta.
                         if len(remaining_rows) == 0:
-                            if hard_delete_filter is not None:
-                                iceberg_table.delete(hard_delete_filter)
+                            if hard_delete_rows is not None:
+                                iceberg_table.upsert_by_equality_delete(
+                                    df=remaining_rows,
+                                    join_cols=primary_keys,
+                                    delete_df=hard_delete_rows,
+                                )
                                 logger.info(f"Executed {num_hard_deletes} hard deletes (no merge needed)")
                             return
 
@@ -1448,50 +1437,18 @@ class IcebergRestClient(JobClientBase, WithSqlClient, SupportsOpenTables, WithSt
                             f"using strategy: {merge_strategy}"
                         )
 
-                        if merge_strategy == "delete-insert":
-                            # Atomic hard-delete + delete + insert in single transaction
-                            deleted, inserted, _ = self._execute_delete_insert(
-                                iceberg_table, remaining_rows, primary_keys, identifier,
-                                hard_delete_filter=hard_delete_filter
-                            )
-                            logger.info(
-                                f"Delete-insert completed: ~{deleted} deleted, "
-                                f"{inserted} inserted"
-                            )
-                        else:
-                            # Default: upsert strategy
-                            # Execute hard deletes first (separate transaction since upsert is atomic)
-                            if hard_delete_filter is not None:
-                                iceberg_table.delete(hard_delete_filter)
-                                logger.info(f"Executed {num_hard_deletes} hard deletes before upsert")
-
-                            batch_size = self.config.merge_batch_size
-                            total_updated = 0
-                            total_inserted = 0
-
-                            for batch_start in range(0, len(remaining_rows), batch_size):
-                                batch_end = min(batch_start + batch_size, len(remaining_rows))
-                                batch = remaining_rows.slice(batch_start, batch_end - batch_start)
-
-                                logger.info(
-                                    f"Upserting batch {batch_start//batch_size + 1}: "
-                                    f"rows {batch_start} to {batch_end} ({len(batch)} rows)"
-                                )
-
-                                upsert_result = iceberg_table.upsert(
-                                    df=batch,
-                                    join_cols=primary_keys,
-                                    when_matched_update_all=True,
-                                    when_not_matched_insert_all=True,
-                                )
-
-                                total_updated += upsert_result.rows_updated
-                                total_inserted += upsert_result.rows_inserted
-
-                            logger.info(
-                                f"Upsert completed: {total_updated} updated, "
-                                f"{total_inserted} inserted across {(len(remaining_rows) + batch_size - 1) // batch_size} batches"
-                            )
+                        deleted, inserted, hard_deleted = self._execute_delete_insert(
+                            iceberg_table,
+                            remaining_rows,
+                            primary_keys,
+                            identifier,
+                            hard_delete_rows=hard_delete_rows,
+                        )
+                        logger.info(
+                            f"{merge_strategy} equality-delete merge completed: "
+                            f"{deleted} replacement keys, {inserted} inserted rows, "
+                            f"{hard_deleted} hard-delete keys"
+                        )
                 else:
                     raise ValueError(f"Unknown write disposition: {disposition_type}")
 
