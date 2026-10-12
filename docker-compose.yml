@@ -1,38 +1,42 @@
 services:
-  # MinIO for S3-compatible storage
+  # S3-compatible storage. MinIO stopped publishing images (minio/minio and
+  # minio/mc are no longer pullable), so this runs RustFS under the same service
+  # name and credentials.
   minio:
-    image: minio/minio:latest
+    image: rustfs/rustfs:1.0.0-rc.5
     container_name: minio-storage
     ports:
       - "9002:9000"
-      - "9001:9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address ":9001"
+      RUSTFS_ACCESS_KEY: minioadmin
+      RUSTFS_SECRET_KEY: minioadmin
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD-SHELL", "curl --fail http://127.0.0.1:9000/health"]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 10
+      start_period: 5s
     volumes:
       - minio-data:/data
 
-  # MinIO client to create bucket. The minio/mc image is no longer pullable;
-  # the server image bundles the same mc binary.
+  # Create the warehouse bucket
   minio-setup:
-    image: minio/minio:latest
+    image: amazon/aws-cli:2.36.40
     container_name: minio-setup
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin;
-      /usr/bin/mc mb myminio/warehouse || true;
-      /usr/bin/mc anonymous set public myminio/warehouse;
-      exit 0;
-      "
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://minio:9000
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - "aws s3api head-bucket --bucket warehouse 2>/dev/null || aws s3 mb s3://warehouse"
 
   # Nessie catalog for Iceberg REST
   nessie:
